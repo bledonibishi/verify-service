@@ -56,6 +56,7 @@ export class SessionsService {
       status: expired ? 'EXPIRED' : session.status,
       expiresAt: session.expiresAt,
       uploaded: session.documents.map((d) => d.kind),
+      documentsDeletedAt: session.documentsDeletedAt,
       verification: session.result ? toSummary(session.result) : null,
       review: reviewSummary(session),
       createdAt: session.createdAt,

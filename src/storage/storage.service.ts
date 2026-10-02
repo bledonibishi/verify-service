@@ -8,6 +8,14 @@ import { decrypt, encrypt } from '../common/crypto';
  * Storage adapter contract. The local-disk implementation below is for development;
  * an S3 adapter can implement the same methods later.
  */
+/** The object is gone (for example erased by retention). Adapters must throw this, not their own error. */
+export class StoredObjectMissingError extends Error {
+  constructor() {
+    super('Stored object is missing');
+    this.name = 'StoredObjectMissingError';
+  }
+}
+
 export interface DocumentStorage {
   put(key: string, data: Buffer): Promise<void>;
   get(key: string): Promise<Buffer>;
@@ -44,7 +52,14 @@ export class StorageService implements DocumentStorage {
   }
 
   async get(key: string): Promise<Buffer> {
-    return decrypt(this.key, await fs.readFile(this.path(key)));
+    let raw: Buffer;
+    try {
+      raw = await fs.readFile(this.path(key));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') throw new StoredObjectMissingError();
+      throw err;
+    }
+    return decrypt(this.key, raw);
   }
 
   async delete(key: string): Promise<void> {

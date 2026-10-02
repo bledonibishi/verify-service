@@ -232,7 +232,7 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
       // moved the session, this update matches nothing and no result is written.
       const moved = await tx.session.updateMany({
         where: { id: session.id, status: SessionStatus.PROCESSING },
-        data: { status: decision },
+        data: { status: decision, ...(decision === 'APPROVED' ? { decidedAt: new Date() } : {}) },
       });
       if (moved.count === 0) return null;
       const result = await tx.verificationResult.create({

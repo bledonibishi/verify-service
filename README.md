@@ -15,7 +15,8 @@ Step 1 of the roadmap is in place: tenants, sessions, encrypted uploads, signed 
 - [x] Reviewer accounts, review API and a small review UI at `/review` (see [docs/review.md](docs/review.md))
 - [x] Face match: ID portrait vs selfie behind a `FaceProvider` interface (AWS Rekognition, per-tenant threshold)
 - [x] Liveness provider layer: `LivenessProvider` interface, challenge endpoint, per-tenant minimum confidence, required for auto-approve (AWS adapter + browser widget come with the upload page)
-- [ ] Per-tenant retention, evidence export, NFC chip SDK, billing
+- [x] Per-tenant retention, data-subject deletion and evidence export (see [docs/retention.md](docs/retention.md))
+- [ ] NFC chip SDK, billing
 - [ ] SDK / embeddable upload widget, retention job, webhook retries
 
 ## Run locally
@@ -37,6 +38,8 @@ pnpm start:dev                          # http://localhost:4100
 
 | Method | Path | Purpose |
 | --- | --- | --- |
+| `DELETE` | `/v1/sessions/:id` | Erase a session and its documents now (data-subject request). `204`; `409` while it is being processed. |
+| `GET` | `/v1/sessions/:id/evidence` and `/evidence/documents/:kind` | Signed evidence bundle and decrypted documents, only for tenants with evidence export enabled. |
 | `POST` | `/v1/sessions` | Start a verification. Body: `externalRef` (your user id), optional `firstName`, `lastName`, `birthDate` (`YYYY-MM-DD`). Returns `id`, `uploadToken`, `uploadUrl`, `expiresAt`. |
 | `GET` | `/v1/sessions/:id` | Current `status`, which documents are uploaded, and `verification` (null until the automated checks have run). |
 
@@ -98,6 +101,10 @@ pnpm reviewer disable alice@customer.example
 ```
 
 They sign in with email and password, see the documents next to what the tenant supplied and the automated results, and approve or reject (a reason is required to reject and is sent to the tenant). The decision is audit-logged and triggers the signed webhook with a `review` object `{ decision, reason, decidedAt }`; `GET /v1/sessions/:id` returns the same. Details, security model and API in [docs/review.md](docs/review.md).
+
+## Retention
+
+Each tenant has its own retention windows: documents are deleted 30 days after the decision by default, the whole record after 5 years, and unsubmitted sessions a day after their link expires. A scheduled job applies them; `DELETE /v1/sessions/:id` erases a person on request and leaves a record with no personal data. Set windows with `pnpm tenant:create ... --doc-retention-days=N --record-retention-days=N` or `pnpm tenant:update <id> ...`. Details: [docs/retention.md](docs/retention.md).
 
 ## Security notes
 

@@ -1,7 +1,7 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, GoneException, Injectable, NotFoundException } from '@nestjs/common';
 import { DocumentKind, Reviewer, SessionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { StorageService } from '../storage/storage.service';
+import { StorageService, StoredObjectMissingError } from '../storage/storage.service';
 import { toSummary } from '../verification/summary';
 import { reviewSummary } from './review-summary';
 import { WebhooksService } from '../webhooks/webhooks.service';
@@ -69,7 +69,13 @@ export class ReviewService {
     });
     const doc = session?.documents[0];
     if (!session || !doc) throw new NotFoundException('Document not found');
-    const data = await this.storage.get(doc.storageKey);
+    let data: Buffer;
+    try {
+      data = await this.storage.get(doc.storageKey);
+    } catch (err) {
+      if (err instanceof StoredObjectMissingError) throw new GoneException('Document was deleted');
+      throw err;
+    }
     await this.prisma.auditLog.create({
       data: { sessionId: session.id, event: 'review.document_viewed', detail: { kind, reviewerId: reviewer.id } },
     });
@@ -84,7 +90,7 @@ export class ReviewService {
     const outcome = await this.prisma.$transaction(async (tx) => {
       const moved = await tx.session.updateMany({
         where: { id, tenantId: reviewer.tenantId, status: SessionStatus.NEEDS_REVIEW },
-        data: { status: decision, reviewedById: reviewer.id, reviewReason: reason ?? null, reviewedAt: new Date() },
+        data: { status: decision, reviewedById: reviewer.id, reviewReason: reason ?? null, reviewedAt: new Date(), decidedAt: new Date() },
       });
       if (moved.count === 0) return null;
       await tx.auditLog.create({
