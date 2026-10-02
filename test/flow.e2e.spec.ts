@@ -1519,7 +1519,7 @@ describe('verification flow (e2e)', () => {
     const suffix = randomToken(6).toLowerCase().replace(/[^a-z0-9]/g, 'x');
     const days = (n: number) => new Date(Date.now() - n * 86_400_000);
     type Call = { eventId: string; body: string; signature: string; at: number };
-    type Step = { status?: number; hang?: boolean; location?: string };
+    type Step = { status?: number; hang?: boolean; location?: string; endless?: boolean };
 
     /** A local receiver that answers from a script, one step per request (the last step repeats). */
     async function receiver(script: Step[]) {
@@ -1538,6 +1538,13 @@ describe('verification flow (e2e)', () => {
           const step = script[Math.min(calls.length, script.length - 1)];
           calls.push({ eventId: String(req.headers['x-verify-event-id']), body, signature: String(req.headers['x-verify-signature']), at: Date.now() });
           if (step.hang) return; // never answer
+          if (step.endless) {
+            // A reply that never ends: reading it to the end would hang until the timeout
+            res.statusCode = step.status ?? 200;
+            const iv = setInterval(() => res.write('x'.repeat(65_536)), 5);
+            res.on('close', () => clearInterval(iv));
+            return;
+          }
           res.statusCode = step.status ?? 200;
           if (step.location) res.setHeader('location', step.location);
           res.end('{"secret":"response body must never be stored"}');
@@ -1745,6 +1752,51 @@ describe('verification flow (e2e)', () => {
       }
     });
 
+
+    it('does not read the receiver’s reply, so an endless one costs nothing', async () => {
+      const rx = await receiver([{ status: 200, endless: true }]);
+      try {
+        const t = await mk('endless', rx.url);
+        const id = (await queue(t, await mkSession(t, 'big')))!;
+        const started = Date.now();
+        void dispatcher.wake();
+        await until(async () => (await eventOf(id)).status === 'DELIVERED', 3000);
+        expect(Date.now() - started).toBeLessThan(900); // well inside the 1 s timeout: nothing waited for the body
+        expect(rx.calls).toHaveLength(1);
+      } finally {
+        await rx.close();
+      }
+    });
+
+    it('fences by claim, so a stale delivery cannot overwrite a replay that reuses its attempt number', async () => {
+      const rx = await receiver([{ hang: true }, { status: 500 }, { status: 500 }, { hang: true }, { status: 200 }]);
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      jest.spyOn(Logger.prototype, 'error').mockImplementation();
+      try {
+        const t = await mk('claimfence', rx.url);
+        const id = (await queue(t, await mkSession(t, 'cf')))!;
+        void dispatcher.wake();
+        await until(async () => rx.calls.length >= 1); // claim 1 (attempt 1) is stuck on the hanging request
+        const staleEnds = rx.calls[0].at + 1150; // its 1 s timeout, plus a margin
+        await prisma.webhookEvent.update({ where: { id }, data: { lockedUntil: new Date(Date.now() - 1000) } });
+        void dispatcher.wake(); // claims 2 and 3 fail with 500, so the event is FAILED
+        await until(async () => (await eventOf(id)).status === 'FAILED');
+        await new Promise((r) => setTimeout(r, 400)); // leave room: the stale claim must end while claim 4 is still in flight
+        await request(http()).post(`/v1/webhook-events/${id}/retry`).set(t.h).expect(202);
+        await until(async () => rx.calls.length >= 4); // claim 4 is in flight with attempts reset to 1, the stale claim's number
+        expect(await eventOf(id)).toMatchObject({ attempts: 1, claims: 4 });
+        while (Date.now() < staleEnds) await new Promise((r) => setTimeout(r, 25));
+        // The stale claim has now timed out and tried to record its failure. It must not have touched the live claim.
+        const row = await eventOf(id);
+        expect(row.claims).toBe(4);
+        expect(row.lockedUntil).not.toBeNull(); // still leased to claim 4
+        await until(async () => (await eventOf(id)).status === 'DELIVERED', 5000);
+      } finally {
+        jest.restoreAllMocks();
+        await rx.close();
+      }
+    });
+
     describe('events API', () => {
       it('is tenant-scoped, filterable and needs an API key', async () => {
         const rx = await receiver([{ status: 200 }]);
@@ -1761,6 +1813,9 @@ describe('verification flow (e2e)', () => {
           const failedOnly = await request(http()).get('/v1/webhook-events?status=FAILED').set(a.h).expect(200);
           expect(failedOnly.body.items).toHaveLength(0);
           await request(http()).get('/v1/webhook-events?status=BOGUS').set(a.h).expect(400);
+          for (const inherited of ['toString', 'constructor', 'hasOwnProperty', '__proto__']) {
+            await request(http()).get(`/v1/webhook-events?status=${inherited}`).set(a.h).expect(400);
+          }
           await request(http()).get('/v1/webhook-events').expect(401);
         } finally {
           await rx.close();
@@ -1811,11 +1866,36 @@ describe('verification flow (e2e)', () => {
         const oldFailed = await mkEv({ status: 'FAILED', createdAt: days(31) });
         const newFailed = await mkEv({ status: 'FAILED', createdAt: days(2) });
         const pending = await mkEv({ status: 'PENDING', nextAttemptAt: days(-1000), createdAt: days(400) });
+        // An old event that failed again recently (a replay) keeps its full window; failedAt, not createdAt, counts
+        const replayedRecently = await mkEv({ status: 'FAILED', createdAt: days(60), failedAt: days(2) });
+        const failedLongAgo = await mkEv({ status: 'FAILED', createdAt: days(60), failedAt: days(40) });
         const report = await retention.run();
-        expect(report.webhookEventsDeleted).toBeGreaterThanOrEqual(2);
-        const left = await prisma.webhookEvent.findMany({ where: { id: { in: [oldDelivered.id, newDelivered.id, oldFailed.id, newFailed.id, pending.id] } } });
-        expect(left.map((e) => e.id).sort()).toEqual([newDelivered.id, newFailed.id, pending.id].sort());
-        await prisma.webhookEvent.delete({ where: { id: pending.id } });
+        expect(report.webhookEventsDeleted).toBeGreaterThanOrEqual(3);
+        const left = await prisma.webhookEvent.findMany({ where: { id: { in: [oldDelivered.id, newDelivered.id, oldFailed.id, newFailed.id, pending.id, replayedRecently.id, failedLongAgo.id] } } });
+        expect(left.map((e) => e.id).sort()).toEqual([newDelivered.id, newFailed.id, pending.id, replayedRecently.id].sort());
+        await prisma.webhookEvent.deleteMany({ where: { id: { in: [pending.id, replayedRecently.id] } } });
+      });
+
+      it('keeps a decided session until its webhook has left the queue, even with a zero-day window', async () => {
+        const t = await mk('zero', 'http://127.0.0.1:9/never');
+        await prisma.tenant.update({ where: { id: t.id }, data: { documentRetentionDays: 0, recordRetentionDays: 0 } });
+        const sid = await mkSession(t, 'zero');
+        await prisma.session.update({ where: { id: sid }, data: { status: 'APPROVED', decidedAt: days(1) } });
+        const ev = await prisma.webhookEvent.create({ data: { tenantId: t.id, sessionId: sid, type: 't', body: '{}', status: 'PENDING', nextAttemptAt: new Date(Date.now() + 3600_000) } });
+        await retention.run();
+        expect(await prisma.session.count({ where: { id: sid } })).toBe(1); // still there: its event is undelivered
+        expect(await prisma.webhookEvent.count({ where: { id: ev.id } })).toBe(1);
+        await prisma.webhookEvent.update({ where: { id: ev.id }, data: { status: 'DELIVERED', deliveredAt: new Date() } });
+        await retention.run();
+        expect(await prisma.session.count({ where: { id: sid } })).toBe(0); // delivered: the window applies
+      });
+
+      it('still erases a session on explicit request while its webhook is pending', async () => {
+        const t = await mk('dsr', 'http://127.0.0.1:9/never');
+        const sid = await mkSession(t, 'dsr');
+        await prisma.webhookEvent.create({ data: { tenantId: t.id, sessionId: sid, type: 't', body: '{}', status: 'PENDING', nextAttemptAt: new Date(Date.now() + 3600_000) } });
+        await request(http()).delete(`/v1/sessions/${sid}`).set(t.h).expect(204);
+        expect(await prisma.webhookEvent.count({ where: { sessionId: sid } })).toBe(0);
       });
     });
   });

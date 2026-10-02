@@ -128,7 +128,7 @@ export class PurgeService {
       where: { status: 'DELIVERED', deliveredAt: { lt: new Date(Date.now() - deliveredAfterDays * day) } },
     });
     const failed = await this.prisma.webhookEvent.deleteMany({
-      where: { status: 'FAILED', createdAt: { lt: new Date(Date.now() - failedAfterDays * day) } },
+      where: { status: 'FAILED', OR: [{ failedAt: { lt: new Date(Date.now() - failedAfterDays * day) } }, { failedAt: null, createdAt: { lt: new Date(Date.now() - failedAfterDays * day) } }] },
     });
     return delivered.count + failed.count;
   }

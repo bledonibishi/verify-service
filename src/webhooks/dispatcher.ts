@@ -11,6 +11,7 @@ const BACKOFF = [1, 4, 20, 60, 120, 360, 720, 1440];
 interface Claimed {
   id: string;
   attempts: number;
+  claims: number;
 }
 
 /**
@@ -40,7 +41,13 @@ export class WebhookDispatcher implements OnApplicationBootstrap, OnModuleDestro
     this.concurrency = Math.max(1, this.int('WEBHOOK_CONCURRENCY', 4));
     this.maxAttempts = Math.max(1, this.int('WEBHOOK_MAX_ATTEMPTS', BACKOFF.length + 1));
     this.baseMs = Math.max(1, this.int('WEBHOOK_RETRY_BASE_MS', 30_000));
-    this.timeoutMs = Math.max(100, this.int('WEBHOOK_TIMEOUT_MS', 10_000));
+    // A request must finish well inside its lease, or a second dispatcher could claim a live delivery
+    this.timeoutMs = Math.min(Math.max(100, this.int('WEBHOOK_TIMEOUT_MS', 10_000)), LEASE_MS - 15_000);
+  }
+
+  /** Error class and the last line of its message: database errors here, never receiver output. */
+  private describe(err: unknown): string {
+    return `${(err as Error).name}: ${String((err as Error).message).split('\n').pop()?.slice(0, 300)}`;
   }
 
   private int(key: string, fallback: number): number {
@@ -76,7 +83,7 @@ export class WebhookDispatcher implements OnApplicationBootstrap, OnModuleDestro
         /* until nothing is due */
       }
     } catch (err) {
-      this.logger.error(`Dispatcher loop failed: ${(err as Error).name}`);
+      this.logger.error(`Dispatcher loop failed: ${this.describe(err)}`);
     }
   }
 
@@ -88,7 +95,7 @@ export class WebhookDispatcher implements OnApplicationBootstrap, OnModuleDestro
       await this.attempt(claimed);
     } catch (err) {
       // Bookkeeping failed (database trouble). The lease lapses and the event is claimed again.
-      this.logger.error(`Webhook event ${claimed.id} bookkeeping failed: ${(err as Error).name}`);
+      this.logger.error(`Webhook event ${claimed.id} bookkeeping failed: ${this.describe(err)}`);
     }
     return true;
   }
@@ -96,7 +103,7 @@ export class WebhookDispatcher implements OnApplicationBootstrap, OnModuleDestro
   private async claim(): Promise<Claimed | null> {
     const rows = await this.prisma.$queryRaw<Claimed[]>(Prisma.sql`
       UPDATE webhook_events
-      SET attempts = attempts + 1, locked_until = now() + ${LEASE_MS} * interval '1 millisecond'
+      SET attempts = attempts + 1, claims = claims + 1, locked_until = now() + ${LEASE_MS} * interval '1 millisecond'
       WHERE id = (
         SELECT id FROM webhook_events
         WHERE status = 'PENDING' AND next_attempt_at <= now() AND (locked_until IS NULL OR locked_until < now())
@@ -104,12 +111,13 @@ export class WebhookDispatcher implements OnApplicationBootstrap, OnModuleDestro
         LIMIT 1
         FOR UPDATE SKIP LOCKED
       )
-      RETURNING id, attempts`);
+      RETURNING id, attempts, claims`);
     return rows[0] ?? null;
   }
 
   private fence(c: Claimed) {
-    return { id: c.id, status: 'PENDING' as const, attempts: c.attempts };
+    // `claims` never repeats for an event (attempts does, after a replay), so only the live claim matches
+    return { id: c.id, status: 'PENDING' as const, claims: c.claims };
   }
 
   private async attempt(c: Claimed) {
@@ -117,7 +125,7 @@ export class WebhookDispatcher implements OnApplicationBootstrap, OnModuleDestro
     if (!event) return;
     const { tenant } = event;
     if (!tenant.webhookUrl) {
-      await this.prisma.webhookEvent.updateMany({ where: this.fence(c), data: { status: 'FAILED', lastError: 'no_url', lockedUntil: null } });
+      await this.prisma.webhookEvent.updateMany({ where: this.fence(c), data: { status: 'FAILED', lastError: 'no_url', lockedUntil: null, failedAt: new Date() } });
       this.logger.warn(`Webhook event ${c.id} dropped: tenant has no webhook URL`);
       return;
     }
@@ -132,7 +140,7 @@ export class WebhookDispatcher implements OnApplicationBootstrap, OnModuleDestro
     }
 
     if (c.attempts >= this.maxAttempts) {
-      await this.prisma.webhookEvent.updateMany({ where: this.fence(c), data: { status: 'FAILED', lastError: result.code, lockedUntil: null } });
+      await this.prisma.webhookEvent.updateMany({ where: this.fence(c), data: { status: 'FAILED', lastError: result.code, lockedUntil: null, failedAt: new Date() } });
       this.logger.error(`Webhook event ${c.id} failed permanently after ${c.attempts} attempts (${result.code})`);
       return;
     }

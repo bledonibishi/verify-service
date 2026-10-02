@@ -16,7 +16,7 @@ export class WebhookEventsController {
 
   @Get()
   async list(@CurrentTenant() tenant: Tenant, @Query('status') status?: string) {
-    if (status !== undefined && !(status in WebhookEventStatus)) throw new BadRequestException('status must be PENDING, DELIVERED or FAILED');
+    if (status !== undefined && !(Object.values(WebhookEventStatus) as string[]).includes(status)) throw new BadRequestException('status must be PENDING, DELIVERED or FAILED');
     const rows = await this.prisma.webhookEvent.findMany({
       where: { tenantId: tenant.id, ...(status ? { status: status as WebhookEventStatus } : {}) },
       orderBy: { createdAt: 'desc' },
@@ -43,7 +43,7 @@ export class WebhookEventsController {
   async retry(@CurrentTenant() tenant: Tenant, @Param('id', ParseUUIDPipe) id: string) {
     const reset = await this.prisma.webhookEvent.updateMany({
       where: { id, tenantId: tenant.id, status: 'FAILED' },
-      data: { status: 'PENDING', attempts: 0, nextAttemptAt: new Date(), lockedUntil: null },
+      data: { status: 'PENDING', attempts: 0, nextAttemptAt: new Date(), lockedUntil: null, failedAt: null },
     });
     if (reset.count === 0) {
       const exists = await this.prisma.webhookEvent.findFirst({ where: { id, tenantId: tenant.id }, select: { id: true } });

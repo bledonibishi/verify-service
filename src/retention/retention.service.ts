@@ -41,7 +41,10 @@ export class RetentionService {
     const report: RetentionReport = { documentsDeleted: 0, recordsDeleted: 0, abandonedDeleted: 0, failed: 0, webhookEventsDeleted: 0 };
 
     // 1. Whole records past their window go first, so their documents are not handled twice.
-    const record = Prisma.sql`s.decided_at IS NOT NULL AND s.decided_at + make_interval(days => t.record_retention_days) <= now()`;
+    // A decision whose webhook is still being delivered is kept until it is delivered or has failed for good;
+    // otherwise a zero-day window could erase an event the tenant has not received yet.
+    const record = Prisma.sql`s.decided_at IS NOT NULL AND s.decided_at + make_interval(days => t.record_retention_days) <= now()
+      AND NOT EXISTS (SELECT 1 FROM webhook_events w WHERE w.session_id = s.id AND w.status = 'PENDING')`;
     // 2. Sessions the user never submitted: the link expired and nothing will ever decide them.
     const abandoned = Prisma.sql`s.status IN ('PENDING', 'EXPIRED') AND s.expires_at + make_interval(hours => ${this.graceHours()}::int) <= now()`;
     // 3. Decided sessions whose documents have outlived their window.

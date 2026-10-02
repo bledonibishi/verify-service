@@ -243,11 +243,16 @@ model WebhookEvent {
   body          String
   status        WebhookEventStatus @default(PENDING)
   attempts      Int                @default(0)
+  // Bumped on every claim and never reset (a replay resets `attempts`): it fences outcomes so a
+  // stale in-flight delivery can never match a later claim of the same event
+  claims        Int                @default(0)
   nextAttemptAt DateTime           @default(now()) @map("next_attempt_at")
   lockedUntil   DateTime?          @map("locked_until")
   // http_<status> | timeout | network | redirect | no_url: a fixed code, never the response body
   lastError     String?            @map("last_error")
   deliveredAt   DateTime?          @map("delivered_at")
+  // When it last entered FAILED; failed-event retention counts from here, not from creation
+  failedAt      DateTime?          @map("failed_at")
   createdAt     DateTime           @default(now()) @map("created_at")
 
   @@index([status, nextAttemptAt])

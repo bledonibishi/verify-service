@@ -26,8 +26,8 @@ export class WebhooksService {
         redirect: 'manual',
         signal: AbortSignal.timeout(timeoutMs),
       });
-      // Drain so the connection can be reused; the body is never read into logs or the database
-      await res.arrayBuffer().catch(() => undefined);
+      // Only the status matters. Cancel instead of reading, so a huge or endless reply costs nothing.
+      await res.body?.cancel().catch(() => undefined);
       if (res.status >= 200 && res.status < 300) return { ok: true };
       return { ok: false, code: `http_${res.status}` };
     } catch (err) {
