@@ -1,0 +1,83 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum SessionStatus {
+  PENDING
+  PROCESSING
+  APPROVED
+  REJECTED
+  NEEDS_REVIEW
+  EXPIRED
+}
+
+enum DocumentKind {
+  ID_FRONT
+  ID_BACK
+  SELFIE
+}
+
+model Tenant {
+  id            String    @id @default(uuid())
+  name          String
+  apiKeyHash    String    @unique @map("api_key_hash")
+  webhookUrl    String?   @map("webhook_url")
+  webhookSecret String    @map("webhook_secret")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  sessions      Session[]
+
+  @@map("tenants")
+}
+
+model Session {
+  id          String        @id @default(uuid())
+  tenantId    String        @map("tenant_id")
+  tenant      Tenant        @relation(fields: [tenantId], references: [id])
+  // Caller's own identifier for the user being verified
+  externalRef String        @map("external_ref")
+  // SHA-256 of the one-time upload token embedded in the session URL
+  tokenHash   String        @unique @map("token_hash")
+  status      SessionStatus @default(PENDING)
+  expectedFirstName String? @map("expected_first_name")
+  expectedLastName  String? @map("expected_last_name")
+  expectedBirthDate String? @map("expected_birth_date")
+  expiresAt   DateTime      @map("expires_at")
+  createdAt   DateTime      @default(now()) @map("created_at")
+  updatedAt   DateTime      @updatedAt @map("updated_at")
+  documents   Document[]
+  auditLogs   AuditLog[]
+
+  @@index([tenantId, externalRef])
+  @@map("sessions")
+}
+
+model Document {
+  id          String       @id @default(uuid())
+  sessionId   String       @map("session_id")
+  session     Session      @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  kind        DocumentKind
+  storageKey  String       @map("storage_key")
+  contentType String       @map("content_type")
+  sizeBytes   Int          @map("size_bytes")
+  createdAt   DateTime     @default(now()) @map("created_at")
+
+  @@unique([sessionId, kind])
+  @@map("documents")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  sessionId String   @map("session_id")
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  event     String
+  detail    Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@index([sessionId])
+  @@map("audit_logs")
+}
