@@ -5,7 +5,7 @@ import { Test } from '@nestjs/testing';
 import { PrismaClient } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import { createServer, Server } from 'http';
-import { mkdtempSync, rmSync } from 'fs';
+import { mkdtempSync, readdirSync, rmSync } from 'fs';
 import { AddressInfo } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -16,6 +16,11 @@ const storageDir = mkdtempSync(join(tmpdir(), 'verify-e2e-'));
 process.env.STORAGE_ENCRYPTION_KEY = randomBytes(32).toString('base64');
 process.env.STORAGE_LOCAL_DIR = storageDir;
 process.env.PUBLIC_BASE_URL = 'http://verify.test';
+
+async function waitFor(cond: () => boolean, ms = 3000) {
+  const end = Date.now() + ms;
+  while (!cond() && Date.now() < end) await new Promise((r) => setTimeout(r, 25));
+}
 
 const PNG = Buffer.concat([
   Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
@@ -125,6 +130,9 @@ describe('verification flow (e2e)', () => {
     const done = await request(http).get(`/v1/sessions/${id}`).set(auth()).expect(200);
     expect(done.body.status).toBe('NEEDS_REVIEW');
 
+    // Webhook is sent after the response, so wait for it to arrive
+    await waitFor(() => hooks.length >= 1);
+
     // Webhook was delivered with a valid signature
     expect(hooks).toHaveLength(1);
     const match = hooks[0].signature.match(/^t=(\d+),v1=([0-9a-f]+)$/);
@@ -155,6 +163,63 @@ describe('verification flow (e2e)', () => {
     } finally {
       await prisma.tenant.delete({ where: { id: other.id } });
     }
+  });
+
+  async function readySession(ref: string) {
+    const http = app.getHttpServer();
+    const created = await request(http).post('/v1/sessions').set(auth()).send({ externalRef: ref }).expect(201);
+    const token = created.body.uploadToken as string;
+    for (const kind of ['ID_FRONT', 'SELFIE']) {
+      await request(http).post(`/v1/upload/${token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+    }
+    return { token, id: created.body.id as string };
+  }
+
+  it('lets only one of several concurrent submits through, with one webhook', async () => {
+    const before = hooks.length;
+    const { token } = await readySession('race');
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => request(app.getHttpServer()).post(`/v1/upload/${token}/submit`)),
+    );
+    const codes = results.map((r) => r.status).sort();
+    expect(codes.filter((c) => c === 200)).toHaveLength(1);
+    expect(codes.filter((c) => c === 410)).toHaveLength(4);
+    await waitFor(() => hooks.length > before);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(hooks.length - before).toBe(1);
+  });
+
+  it('reports an expired session as EXPIRED without anyone touching the link', async () => {
+    const { id } = await readySession('expiry');
+    await prisma.session.update({ where: { id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    const res = await request(app.getHttpServer()).get(`/v1/sessions/${id}`).set(auth()).expect(200);
+    expect(res.body.status).toBe('EXPIRED');
+  });
+
+  it('does not overwrite a submitted session with EXPIRED', async () => {
+    const { token, id } = await readySession('late');
+    await request(app.getHttpServer()).post(`/v1/upload/${token}/submit`).expect(200);
+    await prisma.session.update({ where: { id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    await request(app.getHttpServer()).post(`/v1/upload/${token}/SELFIE`).attach('file', PNG, { filename: 'x.png' }).expect(410);
+    const row = await prisma.session.findUnique({ where: { id } });
+    expect(row?.status).toBe('NEEDS_REVIEW');
+  });
+
+  it('leaves no stored file behind when an upload is refused', async () => {
+    const { token, id } = await readySession('orphan');
+    await request(app.getHttpServer()).post(`/v1/upload/${token}/submit`).expect(200);
+    const dir = join(storageDir, (await prisma.session.findUnique({ where: { id } }))!.tenantId, id);
+    const before = readdirSync(dir).length;
+    await request(app.getHttpServer()).post(`/v1/upload/${token}/SELFIE`).attach('file', PNG, { filename: 'x.png' }).expect(410);
+    expect(readdirSync(dir).length).toBe(before);
+  });
+
+  it('replaces a re-uploaded document and removes the old file', async () => {
+    const { token, id } = await readySession('replace');
+    const dir = join(storageDir, (await prisma.session.findUnique({ where: { id } }))!.tenantId, id);
+    expect(readdirSync(dir)).toHaveLength(2);
+    await request(app.getHttpServer()).post(`/v1/upload/${token}/SELFIE`).attach('file', PNG, { filename: 'x.png' }).expect(204);
+    expect(readdirSync(dir)).toHaveLength(2);
   });
 
   it('rejects unknown tokens', async () => {

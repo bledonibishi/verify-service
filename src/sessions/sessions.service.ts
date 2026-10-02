@@ -14,7 +14,9 @@ export class SessionsService {
 
   async create(tenant: Tenant, dto: CreateSessionDto) {
     const token = randomToken();
-    const ttlMinutes = Number(this.config.get('SESSION_TTL_MINUTES') ?? 60);
+    // Blank or non-numeric values fall back to the default instead of producing 0 or NaN.
+    const configured = parseInt(this.config.get<string>('SESSION_TTL_MINUTES') ?? '', 10);
+    const ttlMinutes = Number.isFinite(configured) && configured > 0 ? configured : 60;
     const session = await this.prisma.session.create({
       data: {
         tenantId: tenant.id,
@@ -44,10 +46,12 @@ export class SessionsService {
       include: { documents: { select: { kind: true } } },
     });
     if (!session) throw new NotFoundException('Session not found');
+    // Expiry is only persisted when someone touches the upload link, so report it here too.
+    const expired = session.status === 'PENDING' && session.expiresAt.getTime() < Date.now();
     return {
       id: session.id,
       externalRef: session.externalRef,
-      status: session.status,
+      status: expired ? 'EXPIRED' : session.status,
       expiresAt: session.expiresAt,
       uploaded: session.documents.map((d) => d.kind),
       createdAt: session.createdAt,
