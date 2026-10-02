@@ -645,6 +645,12 @@ describe('verification flow (e2e)', () => {
 
       it('lets only one of several concurrent challenge starts win', async () => {
         const { token, id } = await startToken('live-concurrent');
+        // The provider call is slow, so every request has read the session (no challenge yet)
+        // before any of them stores one: a genuine overlap, not a lucky interleaving.
+        createImpl = async () => {
+          await new Promise((r) => setTimeout(r, 150));
+          return { providerSessionId: `live-${++sessionCounter}` };
+        };
         const results = await Promise.all(
           Array.from({ length: 5 }, () => request(http()).post(`/v1/upload/${token}/liveness`)),
         );
