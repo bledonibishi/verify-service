@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, SessionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
@@ -16,6 +16,8 @@ const TX = { timeout: 60_000 };
  */
 @Injectable()
 export class PurgeService {
+  private readonly logger = new Logger(PurgeService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
@@ -52,40 +54,58 @@ export class PurgeService {
   }
 
   /** Erase a whole session: files, rows (results, audit log, jobs, documents) and leave a tombstone. */
-  async purgeLocked(tx: Tx, sessionId: string, tenantId: string, reason: PurgeReason): Promise<void> {
+  async purgeLocked(tx: Tx, sessionId: string, tenantId: string, reason: PurgeReason): Promise<number> {
     const docs = await tx.document.findMany({ where: { sessionId } });
     for (const d of docs) await this.storage.delete(d.storageKey);
     await tx.session.delete({ where: { id: sessionId } });
     await tx.deletionRecord.create({ data: { tenantId, sessionId, reason, documentCount: docs.length } });
+    return docs.length;
   }
 
-  /** Run `work` for each due session inside its own short transaction. One failure doesn't stop the rest. */
-  async forEachDue(due: Prisma.Sql, limit: number, work: (tx: Tx, id: string, tenantId: string) => Promise<void>): Promise<{ done: number; failed: number }> {
-    let done = 0;
-    let failed = 0;
-    // Find candidates without holding locks, then lock and re-check each one on its own.
-    const candidates = await this.prisma.$transaction(async (tx) => this.peek(tx, due, limit), TX);
+  /**
+   * Run `work` for each due session inside its own short transaction. One failure doesn't stop the
+   * rest. Sessions that fail are added to `skip` so the same run moves on to newer ones instead of
+   * retrying the same oldest batch forever; the next run tries them again.
+   * `work` returns how many units it handled (documents, or 1 per record).
+   */
+  async forEachDue(
+    due: Prisma.Sql,
+    limit: number,
+    work: (tx: Tx, id: string, tenantId: string) => Promise<number>,
+    skip: Set<string>,
+  ): Promise<{ units: number; sessions: number; failed: number; attempted: number }> {
+    const out = { units: 0, sessions: 0, failed: 0, attempted: 0 };
+    const candidates = await this.prisma.$transaction(async (tx) => this.peek(tx, due, limit, [...skip]), TX);
     for (const id of candidates) {
+      out.attempted++;
+      skip.add(id); // handled or failed, it is not retried within this run
       try {
-        let ran = false;
+        let units: number | null = null;
         await this.prisma.$transaction(async (tx) => {
           const locked = await this.lockDue(tx, Prisma.sql`s.id = ${id} AND (${due})`, 1);
           if (locked.length === 0) return; // someone else got it, or it's no longer due
           const s = await tx.session.findUniqueOrThrow({ where: { id }, select: { tenantId: true } });
-          await work(tx, id, s.tenantId);
-          ran = true;
+          units = await work(tx, id, s.tenantId);
         }, TX);
-        if (ran) done++;
-      } catch {
-        failed++; // rows are untouched; the next run retries
+        if (units !== null) {
+          out.sessions++;
+          out.units += units;
+        }
+      } catch (err) {
+        out.failed++;
+        // The session id and the error class say what is still undeleted and why; no personal data.
+        const code = (err as { code?: string }).code;
+        this.logger.warn(`Erasure failed for session ${id}: ${(err as Error).name}${code ? ` ${code}` : ''}: ${String((err as Error).message).split('\n').pop()?.slice(0, 200)}`);
       }
     }
-    return { done, failed };
+    return out;
   }
 
-  private async peek(tx: Tx, due: Prisma.Sql, limit: number): Promise<string[]> {
+  private async peek(tx: Tx, due: Prisma.Sql, limit: number, skip: string[]): Promise<string[]> {
     const rows = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
-      SELECT s.id FROM sessions s JOIN tenants t ON t.id = s.tenant_id WHERE ${due} ORDER BY s.created_at LIMIT ${limit}`);
+      SELECT s.id FROM sessions s JOIN tenants t ON t.id = s.tenant_id
+      WHERE ${due} AND NOT (s.id = ANY(${skip}::text[]))
+      ORDER BY s.created_at LIMIT ${limit}`);
     return rows.map((r) => r.id);
   }
 

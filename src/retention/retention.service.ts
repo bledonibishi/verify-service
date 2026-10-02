@@ -3,7 +3,6 @@ import { ConfigService } from '@nestjs/config';
 import { Prisma } from '@prisma/client';
 import { PurgeService } from './purge.service';
 
-const BATCH = 50;
 
 export interface RetentionReport {
   documentsDeleted: number;
@@ -31,7 +30,13 @@ export class RetentionService {
     return Number.isFinite(n) && n >= 0 ? n : 24;
   }
 
+  private batch(): number {
+    const n = parseInt(this.config.get<string>('RETENTION_BATCH') ?? '', 10);
+    return Number.isFinite(n) && n >= 1 ? n : 50;
+  }
+
   async run(): Promise<RetentionReport> {
+    const BATCH = this.batch();
     const report: RetentionReport = { documentsDeleted: 0, recordsDeleted: 0, abandonedDeleted: 0, failed: 0 };
 
     // 1. Whole records past their window go first, so their documents are not handled twice.
@@ -47,20 +52,23 @@ export class RetentionService {
       [record, 'retention', 'recordsDeleted'],
       [abandoned, 'abandoned', 'abandonedDeleted'],
     ] as const) {
+      const skip = new Set<string>();
       for (;;) {
-        const r = await this.purge.forEachDue(due, BATCH, (tx, id, tenantId) => this.purge.purgeLocked(tx, id, tenantId, reason));
-        report[key] += r.done;
+        const r = await this.purge.forEachDue(due, BATCH, async (tx, id, tenantId) => {
+          await this.purge.purgeLocked(tx, id, tenantId, reason);
+          return 1;
+        }, skip);
+        report[key] += r.sessions;
         report.failed += r.failed;
-        if (r.done === 0) break; // nothing left, or only failures: stop rather than spin
+        if (r.attempted === 0) break; // every due session has been tried this run
       }
     }
+    const skip = new Set<string>();
     for (;;) {
-      const r = await this.purge.forEachDue(docs, BATCH, async (tx, id) => {
-        await this.purge.deleteDocumentsOf(tx, id);
-      });
-      report.documentsDeleted += r.done;
+      const r = await this.purge.forEachDue(docs, BATCH, (tx, id) => this.purge.deleteDocumentsOf(tx, id), skip);
+      report.documentsDeleted += r.units; // images removed, not sessions
       report.failed += r.failed;
-      if (r.done === 0) break;
+      if (r.attempted === 0) break;
     }
 
     if (report.failed > 0) this.logger.warn(`Retention run: ${report.failed} session(s) failed and will be retried`);

@@ -38,7 +38,7 @@ export class RetentionScheduler implements OnApplicationBootstrap, OnModuleDestr
           this.logger.log(`Retention: documents=${r.documentsDeleted} records=${r.recordsDeleted} abandoned=${r.abandonedDeleted}`);
         }
       })
-      .catch((err) => this.logger.error(`Retention run failed: ${(err as Error).name}`))
+      .catch((err) => this.logger.error(`Retention run failed: ${(err as Error).name}: ${String((err as Error).message).split('\n').pop()?.slice(0, 300)}`))
       .finally(() => {
         this.current = null;
       });

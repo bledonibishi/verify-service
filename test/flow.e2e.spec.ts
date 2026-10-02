@@ -1195,7 +1195,9 @@ describe('verification flow (e2e)', () => {
       const due = await withDocs(t1, 'due', 31);
       const fresh = await withDocs(t1, 'fresh', 29);
       expect(files(t1, due.id)).toHaveLength(3);
-      await retention.run();
+      const report = await retention.run();
+      // The report counts images removed (this session alone had three), not sessions
+      expect(report.documentsDeleted).toBeGreaterThanOrEqual(3);
 
       expect(files(t1, due.id)).toHaveLength(0);
       expect(await prisma.document.count({ where: { sessionId: due.id } })).toBe(0);
@@ -1283,9 +1285,15 @@ describe('verification flow (e2e)', () => {
       const spy = jest.spyOn(StorageService.prototype, 'delete').mockImplementation(function (this: StorageService, key: string) {
         return key.includes(a.id) ? Promise.reject(new Error('disk offline')) : real.call(this, key);
       });
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
       const first = await retention.run();
       spy.mockRestore();
       expect(first.failed).toBeGreaterThanOrEqual(1);
+      // Operators can see which session is still undeleted and why, without any personal data
+      const lines = warn.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('Erasure failed'));
+      expect(lines.some((l) => l.includes(a.id) && l.includes('disk offline'))).toBe(true);
+      expect(lines.join('\n')).not.toMatch(/Dema|Testi|fail-a/);
+      warn.mockRestore();
       // The other session was processed; the failed one still has its rows, files and no deletion stamp
       expect(files(t1, b.id)).toHaveLength(0);
       expect(files(t1, a.id)).toHaveLength(3);
@@ -1295,6 +1303,30 @@ describe('verification flow (e2e)', () => {
       expect(second.failed).toBe(0);
       expect(files(t1, a.id)).toHaveLength(0);
       expect(await prisma.document.count({ where: { sessionId: a.id } })).toBe(0);
+    });
+
+    it('does not let a batch of failing sessions starve newer ones', async () => {
+      const bad = [await withDocs(t1, 'stuck-1', 31), await withDocs(t1, 'stuck-2', 31), await withDocs(t1, 'stuck-3', 31)];
+      const good = await withDocs(t1, 'newer-ok', 31); // created later, so it is behind the stuck ones
+      process.env.RETENTION_BATCH = '2';
+      const real = StorageService.prototype.delete;
+      const spy = jest.spyOn(StorageService.prototype, 'delete').mockImplementation(function (this: StorageService, key: string) {
+        return bad.some((b) => key.includes(b.id)) ? Promise.reject(new Error('stuck')) : real.call(this, key);
+      });
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      try {
+        const report = await retention.run();
+        expect(report.failed).toBeGreaterThanOrEqual(3);
+        expect(files(t1, good.id)).toHaveLength(0); // reached despite three failures ahead of it with a batch of two
+        for (const b of bad) expect(files(t1, b.id)).toHaveLength(3);
+      } finally {
+        delete process.env.RETENTION_BATCH;
+        spy.mockRestore();
+        warn.mockRestore();
+      }
+      const again = await retention.run(); // next run retries the stuck ones
+      expect(again.failed).toBe(0);
+      for (const b of bad) expect(files(t1, b.id)).toHaveLength(0);
     });
 
     describe('DELETE /v1/sessions/:id', () => {
@@ -1379,6 +1411,33 @@ describe('verification flow (e2e)', () => {
         expect(res.body.documents[0]).toMatchObject({ sizeBytes: PNG.length, sha256: sha256(PNG) });
         expect(res.body.auditLog.map((l: { event: string }) => l.event)).toContain('document.uploaded');
         expect(await prisma.auditLog.count({ where: { sessionId: s.id, event: 'evidence.exported' } })).toBe(1);
+        // The signed trail includes the export it accompanies
+        expect(res.body.auditLog[res.body.auditLog.length - 1].event).toBe('evidence.exported');
+      });
+
+      it('reads as gone, not as a server error, when a file was erased but its row survives', async () => {
+        const s = await withDocs(t3, 'ev-half', 3);
+        for (const f of files(t3, s.id)) rmSync(join(dir(t3, s.id), f));
+        await request(http()).get(`/v1/sessions/${s.id}/evidence/documents/SELFIE`).set(t3.h).expect(410);
+        expect(await prisma.auditLog.count({ where: { sessionId: s.id, event: 'evidence.document_exported' } })).toBe(0);
+        await request(http()).get(`/v1/sessions/${s.id}/evidence`).set(t3.h).expect(200); // the bundle itself still works
+      });
+
+      it('never errors when an export races an erasure, in either order', async () => {
+        for (let i = 0; i < 8; i++) {
+          const s = await withDocs(t3, `ev-race-${i}`, 3);
+          const calls: [string, request.Test][] = [
+            ['doc', request(http()).get(`/v1/sessions/${s.id}/evidence/documents/SELFIE`).set(t3.h)],
+            ['bundle', request(http()).get(`/v1/sessions/${s.id}/evidence`).set(t3.h)],
+            ['delete', request(http()).delete(`/v1/sessions/${s.id}`).set(t3.h)],
+          ];
+          if (i % 2) calls.reverse();
+          const results = await Promise.all(calls.map(async ([name, req]) => [name, (await req).status] as const));
+          for (const [, status] of results) expect([200, 204, 404, 410]).toContain(status);
+          expect(results.find(([n]) => n === 'delete')?.[1]).toBe(204);
+          expect(await exists(s.id)).toBe(false);
+          expect(files(t3, s.id)).toHaveLength(0);
+        }
       });
 
       it('serves a decrypted document that matches its recorded hash, and audit-logs it', async () => {

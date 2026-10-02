@@ -27,7 +27,7 @@ The clock starts at the **final decision** (`APPROVED` by the pipeline or by a r
 
 `RetentionService.run()` runs a few seconds after start and then every `RETENTION_INTERVAL_MS` (default one hour); `RETENTION_JOB_ENABLED=false` turns it off on an instance. It is safe to run on several instances at once: each session is locked with `FOR UPDATE SKIP LOCKED` and its due-ness is re-checked under the lock.
 
-Order of operations, for every erasure: **delete the stored files first, then the database rows**, in one transaction. If a file cannot be deleted, the transaction rolls back, the rows still point at the (still existing) files, that session is counted as failed and logged, and the next run retries it. The service never ends up with an encrypted file that nothing points to, and one failing session does not stop the others.
+Order of operations, for every erasure: **delete the stored files first, then the database rows**, in one transaction. If something fails part-way, the transaction rolls back and the session is counted as failed and logged (session id and error class, no personal data). Some of its files may already be gone by then, so for a while rows can point at files that no longer exist; the next run finishes the job, and readers treat a missing file as `410 Gone`, not as a server error. The service never ends up with an encrypted file that nothing points to. A failing session is skipped for the rest of that run, so it can never starve newer ones, and is retried on the next run.
 
 When documents are deleted but the record stays, the session keeps a manifest of what existed (`kind`, `contentType`, `sizeBytes`, `sha256`) and a `documentsDeletedAt` timestamp, and the audit log gets `retention.documents_deleted`. `GET /v1/sessions/:id` then shows `uploaded: []` and `documentsDeletedAt`.
 
@@ -45,9 +45,15 @@ Off by default, because it is the one place the API hands decrypted documents to
 - `GET /v1/sessions/:id/evidence/documents/:kind` returns one decrypted image (`X-Document-Sha256` lets the tenant check it against the bundle). After retention deleted the documents it answers `410`; the bundle still lists them from the manifest.
 - Both are tenant-scoped and audit-logged (`evidence.exported`, `evidence.document_exported`).
 
+## Rolling this out
+
+The migration sets every **existing** tenant's document window equal to its record window (5 years by default), so deploying never deletes anything by itself. Only tenants created afterwards get the 30-day default. To shorten an existing tenant deliberately, run `pnpm tenant:update <id> --doc-retention-days=N`. If you want to inspect before anything can be deleted, start the first deployment with `RETENTION_JOB_ENABLED=false`.
+
 ## Known gaps
 
-- Storage is local disk only. Deleting from the S3 adapter (task 5) must keep the same files-before-rows order and handle object versioning.
+- **All instances must share one storage.** The local-disk adapter is single-host: with several hosts each holding its own directory, a job on a host without the file would treat "not there" as erased. Use shared storage (the S3 adapter, task 5) before running more than one instance.
+
+- Deleting from the S3 adapter (task 5) must keep the same files-before-rows order and handle object versioning.
 - Backups are outside this service: a database or disk backup keeps data until the backup itself expires.
 - The webhook outbox (task 5) will hold event payloads; those need the same erasure when it lands.
 - Reviewer accounts and the tenant's own copies of data are the tenant's responsibility.

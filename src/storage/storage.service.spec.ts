@@ -3,7 +3,7 @@ import { randomBytes } from 'crypto';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { StorageService } from './storage.service';
+import { StorageService, StoredObjectMissingError } from './storage.service';
 
 function make(dir: string, key = randomBytes(32).toString('base64')) {
   const values: Record<string, string> = { STORAGE_ENCRYPTION_KEY: key, STORAGE_LOCAL_DIR: dir };
@@ -39,5 +39,13 @@ describe('StorageService', () => {
   it('requires a valid 32-byte key', () => {
     expect(() => make(dir, '')).toThrow();
     expect(() => make(dir, Buffer.from('short').toString('base64'))).toThrow('32 bytes');
+  });
+
+  it('reports a missing object with a typed error, so callers can tell "erased" from "broken"', async () => {
+    const storage = make(dir);
+    await expect(storage.get('tenant/session/never-existed')).rejects.toBeInstanceOf(StoredObjectMissingError);
+    await storage.put('tenant/session/a', Buffer.from('x'));
+    await storage.delete('tenant/session/a');
+    await expect(storage.get('tenant/session/a')).rejects.toBeInstanceOf(StoredObjectMissingError);
   });
 });
