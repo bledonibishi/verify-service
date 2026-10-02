@@ -120,4 +120,16 @@ export class PurgeService {
       await this.purgeLocked(tx, sessionId, tenantId, 'tenant_request');
     }, TX);
   }
+
+  /** Webhook events carry result flags and the tenant's reference; drop them once they have served their purpose. */
+  async purgeWebhookEvents(deliveredAfterDays: number, failedAfterDays: number): Promise<number> {
+    const day = 86_400_000;
+    const delivered = await this.prisma.webhookEvent.deleteMany({
+      where: { status: 'DELIVERED', deliveredAt: { lt: new Date(Date.now() - deliveredAfterDays * day) } },
+    });
+    const failed = await this.prisma.webhookEvent.deleteMany({
+      where: { status: 'FAILED', OR: [{ failedAt: { lt: new Date(Date.now() - failedAfterDays * day) } }, { failedAt: null, createdAt: { lt: new Date(Date.now() - failedAfterDays * day) } }] },
+    });
+    return delivered.count + failed.count;
+  }
 }
