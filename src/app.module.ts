@@ -9,6 +9,7 @@ import { ApiKeyGuard } from './tenants/api-key.guard';
 import { StorageModule } from './storage/storage.module';
 import { UploadsController } from './uploads/uploads.controller';
 import { UploadsService } from './uploads/uploads.service';
+import { ReviewModule } from './review/review.module';
 import { LivenessModule } from './liveness/liveness.module';
 import { VerificationModule } from './verification/verification.module';
 import { WebhooksModule } from './webhooks/webhooks.module';
@@ -22,6 +23,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
     WebhooksModule,
     VerificationModule,
     LivenessModule,
+    ReviewModule,
   ],
   controllers: [SessionsController, UploadsController],
   providers: [

@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Tenant } from '@prisma/client';
 import { randomToken, sha256 } from '../common/crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { reviewSummary } from '../review/review-summary';
 import { toSummary } from '../verification/summary';
 import { CreateSessionDto } from './sessions.dto';
 
@@ -56,6 +57,7 @@ export class SessionsService {
       expiresAt: session.expiresAt,
       uploaded: session.documents.map((d) => d.kind),
       verification: session.result ? toSummary(session.result) : null,
+      review: reviewSummary(session),
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
     };
