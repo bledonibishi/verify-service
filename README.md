@@ -45,7 +45,7 @@ pnpm start:dev                          # http://localhost:4100
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/v1/upload/:token/:kind` | Multipart field `file` (JPEG/PNG/WebP, max 8 MB). `kind` is `ID_FRONT`, `ID_BACK` or `SELFIE`. Re-uploading replaces the earlier file. |
-| `POST` | `/v1/upload/:token/liveness` | Start a liveness challenge. Returns `{ provider, sessionId, ... }` for the client widget. `501` if no provider is configured; `410` once the session is submitted or expired. Calling again replaces the earlier challenge. |
+| `POST` | `/v1/upload/:token/liveness` | Start a liveness challenge. Returns `{ provider, sessionId, ... }` for the client widget. `501` if no provider is configured; `410` once the session is submitted or expired, `409` if another start won a concurrent race (retry). Calling again later replaces the earlier challenge. |
 | `POST` | `/v1/upload/:token/submit` | Finish. Requires `ID_FRONT` and `SELFIE`; `ID_BACK` is needed for the MRZ checks. Returns `PROCESSING` immediately. |
 
 Statuses: `PENDING`, `PROCESSING`, `NEEDS_REVIEW`, `APPROVED`, `REJECTED`, `EXPIRED`.
@@ -75,7 +75,7 @@ Issue codes are the MRZ parser's (`CHECK_DIGIT_MISMATCH`, `OPTIONAL_DATA_PRESENT
 
 **Liveness.** The `LivenessProvider` interface (`src/liveness`) has two halves: `createSession` (called by `POST /v1/upload/:token/liveness`, the provider's browser/mobile widget then runs the challenge) and `getResult` (called by the pipeline after submit). Only `LIVENESS_PROVIDER=none` exists today, so the endpoint answers `501` and nothing is auto-approved; the AWS Face Liveness adapter and the widget arrive with the hosted upload page. Design points already in place:
 - A "live" verdict only counts if its confidence reaches the tenant's `livenessMinConfidence` (default 90, `--liveness-threshold=NN`).
-- If the provider returns the face image captured during the challenge, the **face match uses that image instead of the uploaded selfie** (`face.source: "liveness"`), so the match is bound to the person who passed liveness. It stays in memory and is never stored.
+- If the provider returns the face image captured during the challenge, the **face match uses that image instead of the uploaded selfie** (`face.source: "liveness"`), so the match is bound to the person who passed liveness. It stays in memory and is never stored. **Auto-approval requires this binding**: a live verdict with a match against the separately uploaded selfie is reported as `FACE_NOT_BOUND_TO_LIVENESS` and goes to review, so a provider must return the challenge image for auto-approve to work.
 - Issue codes: `LIVENESS_NOT_PERFORMED` (no challenge started), `LIVENESS_FAILED`, `LIVENESS_INCOMPLETE`, `LIVENESS_UNAVAILABLE` (provider error; logged as a warning, not retried). Transient provider errors are retried like OCR and face failures.
 - Results hold status, confidence and provider name only. Note: AWS Face Liveness is not offered in every region (Frankfurt may be unsupported; Ireland, `eu-west-1`, is), which needs a decision when the adapter is built.
 

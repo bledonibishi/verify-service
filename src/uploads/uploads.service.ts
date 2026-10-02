@@ -1,4 +1,4 @@
-import { BadRequestException, GoneException, Inject, Injectable, NotImplementedException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, GoneException, Inject, Injectable, NotImplementedException, NotFoundException } from '@nestjs/common';
 import { DocumentKind, SessionStatus } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { sha256 } from '../common/crypto';
@@ -49,12 +49,24 @@ export class UploadsService {
       if (err instanceof LivenessUnavailableError) throw new NotImplementedException('Liveness is not available');
       throw err;
     }
-    // Conditional like every other write, so a submit that won a race is never changed.
+    // Optimistic: only replace the challenge this request saw. Two concurrent starts cannot both
+    // succeed, so a client is never handed an id that another request has already replaced.
     const stored = await this.prisma.session.updateMany({
-      where: { id: session.id, status: SessionStatus.PENDING, expiresAt: { gt: new Date() } },
+      where: {
+        id: session.id,
+        status: SessionStatus.PENDING,
+        expiresAt: { gt: new Date() },
+        livenessSessionId: session.livenessSessionId,
+      },
       data: { livenessSessionId: created.providerSessionId },
     });
-    if (stored.count === 0) throw new GoneException('Session is closed');
+    if (stored.count === 0) {
+      const now = await this.prisma.session.findUnique({ where: { id: session.id } });
+      if (!now || now.status !== SessionStatus.PENDING || now.expiresAt.getTime() <= Date.now()) {
+        throw new GoneException('Session is closed');
+      }
+      throw new ConflictException('A liveness challenge was started elsewhere; retry');
+    }
     await this.prisma.auditLog.create({ data: { sessionId: session.id, event: 'liveness.started' } });
     return { provider: this.liveness.name, sessionId: created.providerSessionId, ...(created.clientConfig ?? {}) };
   }

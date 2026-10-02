@@ -41,7 +41,7 @@ const fakeFace: FaceProvider = {
   },
 };
 // Fake liveness provider: tests set `liveImpl` / `createImpl`.
-const goodLive = async (): Promise<LivenessResult> => ({ status: 'live', confidence: 97 });
+const goodLive = async (): Promise<LivenessResult> => ({ status: 'live', confidence: 97, referenceImage: Buffer.from('ref-from-challenge') });
 let liveImpl: () => Promise<LivenessResult> = goodLive;
 let liveCalls = 0;
 let sessionCounter = 0;
@@ -536,7 +536,7 @@ describe('verification flow (e2e)', () => {
         await setAutoApprove(true);
         const body = await settled(await submitted('face-ok'));
         expect(body.status).toBe('APPROVED');
-        expect(body.verification.face).toEqual({ status: 'match', similarity: 95, provider: 'fake-face', source: 'selfie' });
+        expect(body.verification.face).toEqual({ status: 'match', similarity: 95, provider: 'fake-face', source: 'liveness' });
       });
 
       it('applies the tenant threshold', async () => {
@@ -544,7 +544,7 @@ describe('verification flow (e2e)', () => {
         await setThreshold(99);
         const body = await settled(await submitted('face-strict'));
         expect(body.status).toBe('NEEDS_REVIEW');
-        expect(body.verification.face).toEqual({ status: 'below_threshold', similarity: 95, provider: 'fake-face', source: 'selfie' });
+        expect(body.verification.face).toEqual({ status: 'below_threshold', similarity: 95, provider: 'fake-face', source: 'liveness' });
         expect(body.verification.issues).toEqual(['FACE_BELOW_THRESHOLD']);
       });
 
@@ -641,6 +641,21 @@ describe('verification flow (e2e)', () => {
         expect((await prisma.session.findUnique({ where: { id } }))?.livenessSessionId).toBeNull();
       });
 
+      it('lets only one of several concurrent challenge starts win', async () => {
+        const { token, id } = await startToken('live-concurrent');
+        const results = await Promise.all(
+          Array.from({ length: 5 }, () => request(http()).post(`/v1/upload/${token}/liveness`)),
+        );
+        const winners = results.filter((r) => r.status === 200);
+        expect(winners).toHaveLength(1);
+        expect(results.filter((r) => r.status === 409)).toHaveLength(4);
+        // The id the client was handed is the one that is stored
+        expect((await prisma.session.findUnique({ where: { id } }))?.livenessSessionId).toBe(winners[0].body.sessionId);
+        // A later, non-racing start replaces it
+        const again = await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
+        expect((await prisma.session.findUnique({ where: { id } }))?.livenessSessionId).toBe(again.body.sessionId);
+      });
+
       it('cannot change the challenge after submit, even when racing it', async () => {
         const { token, id } = await startToken('live-late');
         await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
@@ -655,9 +670,10 @@ describe('verification flow (e2e)', () => {
         ]);
         expect(results[0].status).toBe(200);
         const stored = (await prisma.session.findUnique({ where: { id } }))?.livenessSessionId;
-        // Either the challenge was replaced before the submit claimed the session, or not at all
-        const replaced = results.slice(1).some((r) => r.status === 200);
-        expect(replaced ? stored !== first : stored === first).toBe(true);
+        const wins = results.slice(1).filter((r) => r.status === 200);
+        // At most one start wins, and whatever is stored is exactly what that client was given
+        expect(wins.length).toBeLessThanOrEqual(1);
+        expect(stored).toBe(wins.length ? wins[0].body.sessionId : first);
         await settled(id);
         await request(http()).post(`/v1/upload/${token}/liveness`).expect(410);
         expect((await prisma.session.findUnique({ where: { id } }))?.livenessSessionId).toBe(stored);
@@ -736,9 +752,19 @@ describe('verification flow (e2e)', () => {
       });
 
       it('falls back to the uploaded selfie when the provider returns no image', async () => {
+        liveImpl = async () => ({ status: 'live', confidence: 97 });
         const body = await settled(await submitted('live-noref'));
         expect(lastSelfie).not.toEqual(Buffer.from('reference-from-liveness'));
         expect(body.verification.face.source).toBe('selfie');
+      });
+
+      it('never auto-approves when the live verdict has no challenge image to bind the match to', async () => {
+        await setAutoApprove(true);
+        liveImpl = async () => ({ status: 'live', confidence: 97 });
+        const body = await settled(await submitted('live-unbound'));
+        expect(body.status).toBe('NEEDS_REVIEW');
+        expect(body.verification.face).toMatchObject({ status: 'match', source: 'selfie' });
+        expect(body.verification.issues).toEqual(['FACE_NOT_BOUND_TO_LIVENESS']);
       });
     });
 

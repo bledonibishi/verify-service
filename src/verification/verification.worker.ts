@@ -7,7 +7,7 @@ import { WebhooksService } from '../webhooks/webhooks.service';
 import { OCR_PROVIDER, OcrError, OcrProvider, OcrUnavailableError } from '../ocr/ocr-provider';
 import { FACE_PROVIDER, FaceProvider, FaceUnavailableError } from '../face/face-provider';
 import { LIVENESS_PROVIDER, LivenessProvider, LivenessUnavailableError } from '../liveness/liveness-provider';
-import { CheckOutcome, LivenessOutcome, livenessOutcome, withLiveness, FaceOutcome, checkIdBack, decide, emptyOutcome, faceOutcome, withFace } from './decision';
+import { CheckOutcome, LivenessOutcome, bindFaceToLiveness, livenessOutcome, withLiveness, FaceOutcome, checkIdBack, decide, emptyOutcome, faceOutcome, withFace } from './decision';
 import { toSummary } from './summary';
 
 const MAX_ATTEMPTS = 3;
@@ -162,7 +162,10 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
 
     const live = await this.checkLiveness(job, session.livenessSessionId, session.tenant.livenessMinConfidence);
     const { face, missing, source } = await this.checkFace(job, session.documents, session.tenant.faceMatchThreshold, live.referenceImage);
-    const outcome = { ...withFace(withLiveness(mrz, live.outcome, live.performed), face, missing), faceSource: face ? source : null };
+    const outcome = bindFaceToLiveness({
+      ...withFace(withLiveness(mrz, live.outcome, live.performed), face, missing),
+      faceSource: face ? source : null,
+    });
     return {
       outcome,
       providers: { ocr: ocrName, face: face ? this.face.name : null, liveness: live.outcome ? this.liveness.name : null },

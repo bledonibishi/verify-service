@@ -1,11 +1,11 @@
 import { buildTd1, SAMPLE } from '../documents/mrz/testing';
-import { checkIdBack, decide, emptyOutcome, faceOutcome, livenessOutcome, withFace, withLiveness } from './decision';
+import { bindFaceToLiveness, checkIdBack, decide, emptyOutcome, faceOutcome, livenessOutcome, withFace, withLiveness } from './decision';
 
 const who = { firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' };
 const text = (lines = buildTd1(SAMPLE)) => lines.join('\n');
 const goodFace = faceOutcome({ similarity: 97 }, 90);
 const goodLive = livenessOutcome({ status: 'live', confidence: 98 }, 90);
-const full = (o: ReturnType<typeof checkIdBack>) => withLiveness(withFace(o, goodFace), goodLive);
+const full = (o: ReturnType<typeof checkIdBack>) => bindFaceToLiveness({ ...withLiveness(withFace(o, goodFace), goodLive), faceSource: 'liveness' });
 const now = new Date('2026-10-02T00:00:00Z');
 
 describe('checkIdBack / decide', () => {
@@ -41,7 +41,7 @@ describe('checkIdBack / decide', () => {
     ['no face check at all', undefined, undefined],
   ])('never approves with %s', (_n, face, code) => {
     const doc = checkIdBack(text(), who, now);
-    const outcome = withLiveness(face === undefined ? doc : withFace(doc, face), goodLive);
+    const outcome = { ...withLiveness(face === undefined ? doc : withFace(doc, face), goodLive), faceSource: 'liveness' as const };
     if (code) expect(outcome.issueCodes).toContain(code);
     expect(decide(outcome, true)).toBe('NEEDS_REVIEW');
   });
@@ -66,18 +66,27 @@ describe('checkIdBack / decide', () => {
     ['live with no confidence reported', livenessOutcome({ status: 'live', confidence: null }, 90), 'LIVENESS_FAILED'],
     ['provider unavailable', null, 'LIVENESS_UNAVAILABLE'],
   ])('never approves when liveness is %s', (_n, live, code) => {
-    const outcome = withLiveness(withFace(checkIdBack(text(), who, now), goodFace), live);
+    const outcome = { ...withLiveness(withFace(checkIdBack(text(), who, now), goodFace), live), faceSource: 'liveness' as const };
     expect(outcome.issueCodes).toEqual([code]);
     expect(decide(outcome, true)).toBe('NEEDS_REVIEW');
   });
 
   it('never approves when the user did not do a liveness challenge', () => {
-    const outcome = withLiveness(withFace(checkIdBack(text(), who, now), goodFace), null, false);
+    const outcome = { ...withLiveness(withFace(checkIdBack(text(), who, now), goodFace), null, false), faceSource: 'liveness' as const };
     expect(outcome.issueCodes).toEqual(['LIVENESS_NOT_PERFORMED']);
     expect(decide(outcome, true)).toBe('NEEDS_REVIEW');
   });
 
   it('applies the liveness minimum inclusively', () => {
     expect(livenessOutcome({ status: 'live', confidence: 90 }, 90).status).toBe('live');
+  });
+
+  it('never approves a face match made against the uploaded selfie, even with a live verdict', () => {
+    const base = { ...withLiveness(withFace(checkIdBack(text(), who, now), goodFace), goodLive), faceSource: 'selfie' as const };
+    const bound = bindFaceToLiveness(base);
+    expect(bound.issueCodes).toEqual(['FACE_NOT_BOUND_TO_LIVENESS']);
+    expect(decide(bound, true)).toBe('NEEDS_REVIEW');
+    // Defence in depth: even without the issue code the decision itself refuses
+    expect(decide(base, true)).toBe('NEEDS_REVIEW');
   });
 });

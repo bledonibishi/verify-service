@@ -113,6 +113,16 @@ export function withLiveness(outcome: CheckOutcome, liveness: LivenessOutcome | 
   return { ...outcome, liveness, issueCodes: dedupe([...outcome.issueCodes, ...codes]) };
 }
 
+/**
+ * A face match only proves anything about the live person if the compared image came from the
+ * liveness challenge. A "live" verdict paired with a match against the separately uploaded
+ * selfie (someone else's photo, say) must not be approvable.
+ */
+export function bindFaceToLiveness(outcome: CheckOutcome): CheckOutcome {
+  if (outcome.liveness?.status !== 'live' || outcome.face === null || outcome.faceSource === 'liveness') return outcome;
+  return { ...outcome, issueCodes: dedupe([...outcome.issueCodes, 'FACE_NOT_BOUND_TO_LIVENESS']) };
+}
+
 const dedupe = (codes: string[]) => [...new Set(codes)];
 
 const isMatch = (m: FieldMatch | undefined) => m === 'match';
@@ -131,6 +141,7 @@ export function decide(outcome: CheckOutcome, autoApprove: boolean): Decision {
     outcome.expired === false &&
     outcome.face?.status === 'match' &&
     outcome.liveness?.status === 'live' &&
+    outcome.faceSource === 'liveness' &&
     outcome.checks.length > 0 &&
     outcome.checks.every((c) => c.ok) &&
     isMatch(outcome.identity?.surname) &&
