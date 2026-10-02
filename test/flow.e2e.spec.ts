@@ -1,6 +1,6 @@
 // Runs the full flow against a real Postgres (DATABASE_URL). No external services are contacted:
 // the webhook target is a local HTTP server started by the test.
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication, Logger, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { PrismaClient } from '@prisma/client';
 import { randomBytes } from 'crypto';
@@ -13,6 +13,7 @@ import request from 'supertest';
 import { hmacSign, randomToken, sha256 } from '../src/common/crypto';
 import { buildTd1, SAMPLE, Td1Fields } from '../src/documents/mrz/testing';
 import { OCR_PROVIDER, OcrProvider, OcrUnavailableError } from '../src/ocr/ocr-provider';
+import { FACE_PROVIDER, FaceComparison, FaceProvider, FaceUnavailableError } from '../src/face/face-provider';
 import { VerificationWorker } from '../src/verification/verification.worker';
 
 // Fake OCR: tests set `ocrImpl`. Nothing here touches a real OCR engine.
@@ -23,6 +24,17 @@ const fakeOcr: OcrProvider = {
   readText: async () => {
     ocrCalls++;
     return ocrImpl();
+  },
+};
+// Fake face provider: tests set `faceImpl`. AWS is never contacted.
+const goodFace = async (): Promise<FaceComparison> => ({ status: 'compared', similarity: 95 });
+let faceImpl: () => Promise<FaceComparison> = goodFace;
+let faceCalls = 0;
+const fakeFace: FaceProvider = {
+  name: 'fake-face',
+  compare: async () => {
+    faceCalls++;
+    return faceImpl();
   },
 };
 const mrzText = (f: Partial<Td1Fields> = {}) => buildTd1({ ...SAMPLE, ...f }).join('\n');
@@ -82,6 +94,8 @@ describe('verification flow (e2e)', () => {
     const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
       .overrideProvider(OCR_PROVIDER)
       .useValue(fakeOcr)
+      .overrideProvider(FACE_PROVIDER)
+      .useValue(fakeFace)
       .compile();
     worker = moduleRef.get(VerificationWorker);
     app = moduleRef.createNestApplication();
@@ -283,8 +297,11 @@ describe('verification flow (e2e)', () => {
     }
 
     const setAutoApprove = (autoApprove: boolean) => prisma.tenant.update({ where: { id: tenantId }, data: { autoApprove } });
+    const setThreshold = (faceMatchThreshold: number) => prisma.tenant.update({ where: { id: tenantId }, data: { faceMatchThreshold } });
     afterEach(async () => {
       await setAutoApprove(false);
+      await setThreshold(90);
+      faceImpl = goodFace;
       ocrImpl = async () => ({ text: '' });
     });
 
@@ -481,6 +498,82 @@ describe('verification flow (e2e)', () => {
       expect((await request(http()).get(`/v1/sessions/${slow}`).set(auth())).body.status).toBe('PROCESSING');
       release();
       expect((await settled(slow)).status).toBe('NEEDS_REVIEW');
+    });
+
+    describe('face match', () => {
+      beforeEach(() => {
+        ocrImpl = async () => ({ text: mrzText() });
+      });
+
+      it('approves only when document and face both pass, and reports the score', async () => {
+        await setAutoApprove(true);
+        const body = await settled(await submitted('face-ok'));
+        expect(body.status).toBe('APPROVED');
+        expect(body.verification.face).toEqual({ status: 'match', similarity: 95, provider: 'fake-face' });
+      });
+
+      it('applies the tenant threshold', async () => {
+        await setAutoApprove(true);
+        await setThreshold(99);
+        const body = await settled(await submitted('face-strict'));
+        expect(body.status).toBe('NEEDS_REVIEW');
+        expect(body.verification.face).toEqual({ status: 'below_threshold', similarity: 95, provider: 'fake-face' });
+        expect(body.verification.issues).toEqual(['FACE_BELOW_THRESHOLD']);
+      });
+
+      it.each([
+        ['no face', { status: 'no_face' } as FaceComparison, 'FACE_NOT_DETECTED'],
+        ['several faces', { status: 'multiple_faces' } as FaceComparison, 'FACE_MULTIPLE_FACES'],
+        ['an unusable image', { status: 'unusable_image' } as FaceComparison, 'FACE_IMAGE_UNUSABLE'],
+        ['a different person', { status: 'compared', similarity: 12 } as FaceComparison, 'FACE_BELOW_THRESHOLD'],
+      ])('sends %s to review even with auto-approve on', async (_n, result, code) => {
+        await setAutoApprove(true);
+        faceImpl = async () => result;
+        const body = await settled(await submitted(`face-${code}`));
+        expect(body.status).toBe('NEEDS_REVIEW');
+        expect(body.verification.issues).toEqual([code]);
+      });
+
+      it('goes to review without retrying when face matching is unavailable', async () => {
+        await setAutoApprove(true);
+        const before = faceCalls;
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+        faceImpl = async () => {
+          throw new FaceUnavailableError('no credentials');
+        };
+        const body = await settled(await submitted('face-unavailable'));
+        expect(body.status).toBe('NEEDS_REVIEW');
+        expect(body.verification.face).toEqual({ status: null, similarity: null, provider: null });
+        expect(body.verification.issues).toEqual(['FACE_UNAVAILABLE']);
+        expect(faceCalls - before).toBe(1);
+        // A broken deployment must be visible in the logs, without any image or document data
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('Face matching unavailable'));
+        expect(JSON.stringify(warn.mock.calls)).not.toContain(SAMPLE.surname);
+        warn.mockRestore();
+      });
+
+      it('retries a transient face failure', async () => {
+        let n = 0;
+        faceImpl = async () => {
+          if (++n < 2) throw new Error('throttled');
+          return goodFace();
+        };
+        expect((await settled(await submitted('face-flaky'))).verification.face.status).toBe('match');
+        expect(n).toBe(2);
+      });
+
+      it('still checks the face when the ID back is missing', async () => {
+        const body = await settled(await submitted('face-noback', undefined, false));
+        expect(body.verification.face.status).toBe('match');
+        expect(body.verification.issues).toEqual(['ID_BACK_MISSING']);
+      });
+
+      it('stores the score and provider but no image data', async () => {
+        const id = await submitted('face-row');
+        await settled(id);
+        const row = await prisma.verificationResult.findUnique({ where: { sessionId: id } });
+        expect(row).toMatchObject({ faceStatus: 'match', faceSimilarity: 95, faceProvider: 'fake-face' });
+      });
     });
 
     it('does not expose another tenant’s verification result', async () => {

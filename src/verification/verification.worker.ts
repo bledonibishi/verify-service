@@ -5,7 +5,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
 import { OCR_PROVIDER, OcrError, OcrProvider, OcrUnavailableError } from '../ocr/ocr-provider';
-import { CheckOutcome, checkIdBack, decide, emptyOutcome } from './decision';
+import { FACE_PROVIDER, FaceProvider, FaceUnavailableError } from '../face/face-provider';
+import { CheckOutcome, FaceOutcome, checkIdBack, decide, emptyOutcome, faceOutcome, withFace } from './decision';
 import { toSummary } from './summary';
 
 const MAX_ATTEMPTS = 3;
@@ -37,6 +38,7 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     private readonly webhooks: WebhooksService,
     private readonly config: ConfigService,
     @Inject(OCR_PROVIDER) private readonly ocr: OcrProvider,
+    @Inject(FACE_PROVIDER) private readonly face: FaceProvider,
   ) {
     this.enabled = config.get('VERIFICATION_WORKER_ENABLED') !== 'false';
     this.concurrency = Math.max(1, this.int('VERIFICATION_CONCURRENCY', 2));
@@ -94,10 +96,10 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     try {
       if (job.attempts > MAX_ATTEMPTS) {
         // The worker died repeatedly while holding this job: stop retrying.
-        await this.finish(job, emptyOutcome('PIPELINE_ERROR'), 'none');
+        await this.finish(job, emptyOutcome('PIPELINE_ERROR'), { ocr: 'none', face: null });
       } else {
         const outcome = await this.run(job);
-        if (outcome) await this.finish(job, outcome.outcome, outcome.provider);
+        if (outcome) await this.finish(job, outcome.outcome, outcome.providers);
       }
     } catch (err) {
       await this.fail(job, err);
@@ -122,38 +124,68 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     return rows[0] ?? null;
   }
 
-  /** Reads the ID back and checks it. Returns null when the session is no longer ours to decide. */
-  private async run(job: ClaimedJob): Promise<{ outcome: CheckOutcome; provider: string } | null> {
+  /** Runs the document and face checks. Returns null when the session is no longer ours to decide. */
+  private async run(job: ClaimedJob): Promise<{ outcome: CheckOutcome; providers: { ocr: string; face: string | null } } | null> {
     const session = await this.prisma.session.findUnique({
       where: { id: job.session_id },
-      include: { documents: true },
+      include: { documents: true, tenant: true },
     });
     if (!session || session.status !== SessionStatus.PROCESSING) {
       await this.prisma.verificationJob.updateMany({ where: this.fence(job), data: { status: 'DONE', lockedUntil: null } });
       return null;
     }
-    const back = session.documents.find((d) => d.kind === DocumentKind.ID_BACK);
-    if (!back) return { outcome: emptyOutcome('ID_BACK_MISSING'), provider: 'none' };
+    const doc = (kind: DocumentKind) => session.documents.find((d) => d.kind === kind);
 
-    const image = await this.storage.get(back.storageKey);
-    let text: string;
-    try {
-      text = (await this.ocr.readText(image)).text;
-    } catch (err) {
-      // Without an OCR engine retrying is pointless; hand the session to a person right away.
-      if (err instanceof OcrUnavailableError) return { outcome: emptyOutcome('OCR_UNAVAILABLE'), provider: this.ocr.name };
-      throw err;
+    const back = doc(DocumentKind.ID_BACK);
+    let mrz: CheckOutcome;
+    let ocrName = this.ocr.name;
+    if (!back) {
+      mrz = emptyOutcome('ID_BACK_MISSING');
+      ocrName = 'none';
+    } else {
+      const image = await this.storage.get(back.storageKey);
+      try {
+        const { text } = await this.ocr.readText(image);
+        mrz = checkIdBack(text, {
+          firstName: session.expectedFirstName ?? undefined,
+          lastName: session.expectedLastName ?? undefined,
+          birthDate: session.expectedBirthDate ?? undefined,
+        });
+      } catch (err) {
+        // Without an OCR engine retrying is pointless; record it and let a person decide.
+        if (!(err instanceof OcrUnavailableError)) throw err;
+        mrz = emptyOutcome('OCR_UNAVAILABLE');
+      }
     }
-    const outcome = checkIdBack(text, {
-      firstName: session.expectedFirstName ?? undefined,
-      lastName: session.expectedLastName ?? undefined,
-      birthDate: session.expectedBirthDate ?? undefined,
-    });
-    return { outcome, provider: this.ocr.name };
+
+    const { face, missing } = await this.checkFace(job, session.documents, session.tenant.faceMatchThreshold);
+    return { outcome: withFace(mrz, face, missing), providers: { ocr: ocrName, face: face ? this.face.name : null } };
+  }
+
+  /** ID portrait vs selfie. `face` is null when no comparison happened; `missing` says why if documents were absent. */
+  private async checkFace(
+    job: ClaimedJob,
+    documents: { kind: DocumentKind; storageKey: string }[],
+    threshold: number,
+  ): Promise<{ face: FaceOutcome | null; missing: string[] }> {
+    const front = documents.find((d) => d.kind === DocumentKind.ID_FRONT);
+    const selfie = documents.find((d) => d.kind === DocumentKind.SELFIE);
+    if (!front || !selfie) {
+      return { face: null, missing: [...(front ? [] : ['ID_FRONT_MISSING']), ...(selfie ? [] : ['SELFIE_MISSING'])] };
+    }
+    try {
+      const [idImage, selfieImage] = await Promise.all([this.storage.get(front.storageKey), this.storage.get(selfie.storageKey)]);
+      return { face: faceOutcome(await this.face.compare(idImage, selfieImage), threshold), missing: [] };
+    } catch (err) {
+      if (!(err instanceof FaceUnavailableError)) throw err;
+      // Every session now goes to review; make a broken deployment visible (but not a deliberate "none").
+      if (this.face.name !== 'none') this.logger.warn(`Face matching unavailable for job ${job.id}: ${err.message}`);
+      return { face: null, missing: [] };
+    }
   }
 
   /** Records the result and moves the session, only if it is still PROCESSING. */
-  private async finish(job: ClaimedJob, outcome: CheckOutcome, provider: string) {
+  private async finish(job: ClaimedJob, outcome: CheckOutcome, providers: { ocr: string; face: string | null }) {
     const committed = await this.prisma.$transaction(async (tx) => {
       // Ownership fence: if our lease lapsed and another worker re-claimed the job, we are stale
       // and must not record anything.
@@ -183,7 +215,10 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
           expired: outcome.expired,
           checks: outcome.checks,
           issueCodes: outcome.issueCodes,
-          ocrProvider: provider,
+          ocrProvider: providers.ocr,
+          faceStatus: outcome.face?.status ?? null,
+          faceSimilarity: outcome.face?.similarity ?? null,
+          faceProvider: providers.face,
         },
       });
       await tx.auditLog.create({
@@ -213,7 +248,7 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     this.logger.warn(`Verification job ${job.id} attempt ${job.attempts} failed: ${(err as Error).name}${err instanceof OcrError ? ` (${err.reason})` : ''}`);
     try {
       if (job.attempts >= MAX_ATTEMPTS) {
-        await this.finish(job, emptyOutcome('PIPELINE_ERROR'), this.ocr.name);
+        await this.finish(job, emptyOutcome('PIPELINE_ERROR'), { ocr: this.ocr.name, face: null });
         return;
       }
       const base = this.int('VERIFICATION_RETRY_BASE_MS', 5000);
