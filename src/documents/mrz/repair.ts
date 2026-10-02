@@ -13,7 +13,9 @@ type CharClass = 'alpha' | 'digit' | 'any';
 // Kosovo TD1 layout by position (see td1.ts). Line 2 positions 18-27 are the 10-digit personal number.
 const LINE1: CharClass[] = [
   ...Array(5).fill('alpha'), // type + issuer
-  ...Array(9).fill('any'), // document number: 2 letters + 7 digits
+  'alpha',
+  'alpha',
+  ...Array(7).fill('digit'), // document number: observed as 2 letters + 7 digits
   'digit', // check digit
   ...Array(15).fill('any'), // optional data (empty on Kosovo cards)
 ];
@@ -58,8 +60,12 @@ function repairNameLine(line: string): string {
 export function repairKosovoTd1(lines: string[]): string[] {
   if (lines.length !== 3 || lines.some((l) => l.length !== 30)) return lines;
   const line1 = applyClasses(lines[0], LINE1);
+  // Kosovo cards leave optional data 1 empty. Only blank it when it is made of filler or the
+  // letters OCR mistakes for filler; real content (digits, other letters) stays, so tampering with
+  // that field is reported and not quietly erased.
+  const optional = line1.slice(15);
   return [
-    line1.slice(0, 15) + '<'.repeat(15), // Kosovo cards leave optional data 1 empty
+    line1.slice(0, 15) + (/^[<KCLES]+$/.test(optional) ? '<'.repeat(15) : optional),
     applyClasses(lines[1], LINE2),
     repairNameLine(lines[2]),
   ];
@@ -98,8 +104,13 @@ export function parseKosovoTd1(lines: string[], opts: ParseOptions = {}): Lenien
   if (tidy) return { result: direct, lines: clean, repaired: false };
 
   const fixed = repairKosovoTd1(clean);
+  // Nothing to repair: report what we have instead of claiming a correction that didn't happen.
+  if (fixed.every((l, i) => l === clean[i])) return { result: direct, lines: clean, repaired: false };
   const retry = parseTd1(fixed, opts);
-  if (retry.ok) return { result: retry, lines: fixed, repaired: true };
+  if (retry.ok) {
+    retry.issues.push({ code: 'OCR_REPAIRED', severity: 'warning', message: 'MRZ characters were corrected after OCR' });
+    return { result: retry, lines: fixed, repaired: true };
+  }
 
   return { result: direct, lines: clean, repaired: false };
 }

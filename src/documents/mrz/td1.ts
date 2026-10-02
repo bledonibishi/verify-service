@@ -30,7 +30,10 @@ export type MrzIssueCode =
   | 'UNEXPECTED_NATIONALITY'
   | 'DOCUMENT_NUMBER_FORMAT'
   | 'PERSONAL_NUMBER_FORMAT'
-  | 'OPTIONAL_DATA_PRESENT';
+  | 'OPTIONAL_DATA_PRESENT'
+  | 'INVALID_NAME'
+  | 'GIVEN_NAMES_MISSING'
+  | 'OCR_REPAIRED';
 
 export interface MrzIssue {
   code: MrzIssueCode;
@@ -70,14 +73,25 @@ export interface ParseOptions {
 
 const stripFiller = (s: string) => s.replace(/<+$/, '');
 
+/**
+ * Two-digit years carry no century, so pick the one that makes sense for the field: a birth date is
+ * never in the future (latest matching year up to now), and an expiry date is the matching year
+ * within 50 years of now. Without this, an expiry of 991231 would read as 2099 and look valid.
+ */
 function parseDate(yymmdd: string, kind: 'birth' | 'expiry', now: Date): string | null {
   if (!/^\d{6}$/.test(yymmdd)) return null;
   const yy = Number(yymmdd.slice(0, 2));
   const mm = Number(yymmdd.slice(2, 4));
   const dd = Number(yymmdd.slice(4, 6));
-  // A birth year later than the current two-digit year must belong to the previous century.
-  const century = kind === 'birth' && yy > now.getUTCFullYear() % 100 ? 1900 : 2000;
-  const year = century + yy;
+  const nowYear = now.getUTCFullYear();
+  let year = Math.floor(nowYear / 100) * 100 + yy;
+  if (kind === 'birth') {
+    if (year > nowYear) year -= 100;
+  } else if (year - nowYear > 50) {
+    year -= 100;
+  } else if (nowYear - year > 50) {
+    year += 100;
+  }
   const d = new Date(Date.UTC(year, mm - 1, dd));
   if (d.getUTCFullYear() !== year || d.getUTCMonth() !== mm - 1 || d.getUTCDate() !== dd) return null;
   return `${year}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
@@ -132,7 +146,9 @@ export function parseTd1(lines: string[], opts: ParseOptions = {}): Td1Result {
 
   const birthDate = parseDate(birthRaw, 'birth', now);
   const expiryDate = parseDate(expiryRaw, 'expiry', now);
+  const today = now.toISOString().slice(0, 10);
   if (!birthDate) issues.push({ code: 'INVALID_BIRTH_DATE', severity: 'error', message: 'Birth date is not a real date' });
+  else if (birthDate > today) issues.push({ code: 'INVALID_BIRTH_DATE', severity: 'error', message: 'Birth date is in the future' });
   if (!expiryDate) issues.push({ code: 'INVALID_EXPIRY_DATE', severity: 'error', message: 'Expiry date is not a real date' });
 
   const sexChar = l2[7];
@@ -167,6 +183,14 @@ export function parseTd1(lines: string[], opts: ParseOptions = {}): Td1Result {
   const surname = surnamePart.replace(/</g, ' ').trim();
   const givenNames = rest.join(' ').replace(/</g, ' ').trim();
 
+  if (/\d/.test(l3)) {
+    issues.push({ code: 'INVALID_NAME', severity: 'error', message: 'Name line contains digits' });
+  } else if (!surname) {
+    issues.push({ code: 'INVALID_NAME', severity: 'error', message: 'Surname is missing' });
+  } else if (!givenNames) {
+    issues.push({ code: 'GIVEN_NAMES_MISSING', severity: 'warning', message: 'Given names are missing' });
+  }
+
   const hasError = issues.some((i) => i.severity === 'error');
   const data: Td1Data | null =
     birthDate && expiryDate
@@ -181,7 +205,7 @@ export function parseTd1(lines: string[], opts: ParseOptions = {}): Td1Result {
           personalNumber,
           surname,
           givenNames,
-          expired: expiryDate < now.toISOString().slice(0, 10),
+          expired: expiryDate < today,
         }
       : null;
 

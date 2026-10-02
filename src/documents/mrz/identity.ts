@@ -29,22 +29,24 @@ export function normalizeName(name: string): string {
     .trim();
 }
 
+/** The supplied first name(s) must be the leading given name(s) on the card, in order. */
 function matchGiven(expected: string, mrzGiven: string): boolean {
-  const exp = normalizeName(expected);
-  const mrz = normalizeName(mrzGiven);
-  if (exp === mrz) return true;
-  const mrzTokens = mrz.split(' ');
-  // The caller may supply only the first of several given names.
-  return exp.split(' ').every((t) => mrzTokens.includes(t));
+  const exp = normalizeName(expected).split(' ');
+  const mrz = normalizeName(mrzGiven).split(' ');
+  return exp.length <= mrz.length && exp.every((token, i) => token === mrz[i]);
 }
 
 export function compareIdentity(data: Td1Data, expected: ExpectedIdentity): IdentityComparison {
-  const field = (provided: string | undefined, ok: () => boolean): FieldMatch =>
-    !provided ? 'not_provided' : ok() ? 'match' : 'mismatch';
+  // Text that normalises to nothing (e.g. "!!!") was provided, but can never match a name.
+  const field = (provided: string | undefined, ok: (normalized: string) => boolean): FieldMatch => {
+    if (!provided?.trim()) return 'not_provided';
+    const normalized = normalizeName(provided);
+    return normalized !== '' && ok(normalized) ? 'match' : 'mismatch';
+  };
 
   return {
-    surname: field(expected.lastName, () => normalizeName(expected.lastName!) === normalizeName(data.surname)),
+    surname: field(expected.lastName, (n) => n === normalizeName(data.surname)),
     givenNames: field(expected.firstName, () => matchGiven(expected.firstName!, data.givenNames)),
-    birthDate: field(expected.birthDate, () => expected.birthDate === data.birthDate),
+    birthDate: !expected.birthDate ? 'not_provided' : expected.birthDate === data.birthDate ? 'match' : 'mismatch',
   };
 }

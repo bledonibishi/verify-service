@@ -92,6 +92,40 @@ describe('parseTd1', () => {
     expect(res.issues.map((i) => i.code)).toContain('OPTIONAL_DATA_PRESENT');
   });
 
+  it('rejects a name line with no names (finding 2)', () => {
+    const lines = buildTd1(SAMPLE);
+    lines[2] = '<'.repeat(30);
+    const res = parseTd1(lines, { now: NOW });
+    expect(res.ok).toBe(false);
+    expect(res.issues.map((i) => i.code)).toContain('INVALID_NAME');
+  });
+
+  it('rejects digits inside names, and only warns when given names are absent', () => {
+    const digits = buildTd1(SAMPLE);
+    digits[2] = 'T3STI<<DEMA'.padEnd(30, '<');
+    expect(parseTd1(digits, { now: NOW }).issues.map((i) => i.code)).toContain('INVALID_NAME');
+
+    const noGiven = parseTd1(buildTd1({ ...SAMPLE, givenNames: '' }), { now: NOW });
+    expect(noGiven.ok).toBe(true);
+    expect(noGiven.issues.map((i) => i.code)).toContain('GIVEN_NAMES_MISSING');
+  });
+
+  it('rejects a birth date in the future (finding 4)', () => {
+    const res = parseTd1(buildTd1({ ...SAMPLE, birth: '261231' }), { now: NOW });
+    expect(res.ok).toBe(false);
+    expect(res.issues.some((i) => i.code === 'INVALID_BIRTH_DATE')).toBe(true);
+    // Today itself is fine
+    expect(parseTd1(buildTd1({ ...SAMPLE, birth: '261002' }), { now: NOW }).ok).toBe(true);
+  });
+
+  it('reads an old two-digit expiry year as past, not 2099 (finding 7)', () => {
+    const res = parseTd1(buildTd1({ ...SAMPLE, expiry: '991231' }), { now: NOW });
+    expect(res.data?.expiryDate).toBe('1999-12-31');
+    expect(res.data?.expired).toBe(true);
+    // Still reads a normal long-validity card as future
+    expect(parseTd1(buildTd1({ ...SAMPLE, expiry: '351231' }), { now: NOW }).data?.expired).toBe(false);
+  });
+
   it('rejects wrong shapes and characters', () => {
     expect(parseTd1(['ID'], { now: NOW }).issues[0].code).toBe('WRONG_LENGTH');
     const lines = buildTd1(SAMPLE);
@@ -154,6 +188,40 @@ describe('OCR repair', () => {
     expect(res.repaired).toBe(false);
   });
 
+  it('repairs look-alike letters inside the card number (finding 3)', () => {
+    const noisy = [...good];
+    noisy[0] = noisy[0].slice(0, 5) + 'ID0O00OOI' + noisy[0].slice(14);
+    const res = parseKosovoTd1(noisy, { now: NOW });
+    expect(res.result.ok).toBe(true);
+    expect(res.result.data?.documentNumber).toBe('ID0000001');
+  });
+
+  it('flags OCR repairs so callers can see the MRZ was corrected', () => {
+    const noisy = [...good];
+    noisy[1] = noisy[1].replace('900515', '9O05I5');
+    const res = parseKosovoTd1(noisy, { now: NOW });
+    expect(res.result.issues.map((i) => i.code)).toContain('OCR_REPAIRED');
+  });
+
+  it('does not erase real content in the optional field (finding 1)', () => {
+    // Content that breaks the composite digit stays invalid and is never wiped by repair
+    const breaks = [...good];
+    breaks[0] = breaks[0].slice(0, 15) + '123456789012346';
+    expect(parseTd1(breaks, { now: NOW }).ok).toBe(false);
+    const res = parseKosovoTd1(breaks, { now: NOW });
+    expect(res.result.ok).toBe(false);
+    expect(res.repaired).toBe(false);
+    expect(res.lines[0].slice(15)).toBe('123456789012346');
+
+    // Content whose check sum happens to cancel out is kept too, and keeps its warning
+    const cancels = [...good];
+    cancels[0] = cancels[0].slice(0, 15) + '123456789012345';
+    const kept = parseKosovoTd1(cancels, { now: NOW });
+    expect(kept.repaired).toBe(false);
+    expect(kept.lines[0].slice(15)).toBe('123456789012345');
+    expect(kept.result.issues.map((i) => i.code)).toContain('OPTIONAL_DATA_PRESENT');
+  });
+
   it('leaves wrongly sized input untouched', () => {
     expect(repairKosovoTd1(['ID', 'x', 'y'])).toEqual(['ID', 'x', 'y']);
   });
@@ -192,6 +260,21 @@ describe('identity comparison', () => {
       compareIdentity(data, { firstName: 'Hëna', lastName: 'Krasniqi', birthDate: '1990-05-15' }),
     ).toEqual({ surname: 'match', givenNames: 'match', birthDate: 'match' });
     expect(compareIdentity(data, { firstName: 'Hena Maria' }).givenNames).toBe('match');
+  });
+
+  it('requires the supplied first name to be the leading given name (finding 5)', () => {
+    expect(compareIdentity(data, { firstName: 'Maria' }).givenNames).toBe('mismatch');
+    expect(compareIdentity(data, { firstName: 'Hena' }).givenNames).toBe('match');
+    expect(compareIdentity(data, { firstName: 'Maria Hena' }).givenNames).toBe('mismatch');
+  });
+
+  it('never lets text without letters match a name (finding 6)', () => {
+    const blank = { ...data, surname: '', givenNames: '' };
+    expect(compareIdentity(blank, { lastName: '!!!', firstName: '123' })).toMatchObject({
+      surname: 'mismatch',
+      givenNames: 'mismatch',
+    });
+    expect(compareIdentity(data, { lastName: '   ' }).surname).toBe('not_provided');
   });
 
   it('reports mismatches and omitted fields', () => {
