@@ -4,10 +4,14 @@
 import { CreateBucketCommand, S3Client } from '@aws-sdk/client-s3';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes, randomUUID } from 'crypto';
+import { assertLocalEndpoint } from '../../test/local-endpoint';
 import { StoredObjectMissingError } from './blob-store';
 import { StorageService } from './storage.service';
 
 const endpoint = process.env.S3_TEST_ENDPOINT;
+
+// This suite creates buckets and writes objects, so refuse anything but a local server before a client exists.
+if (endpoint) assertLocalEndpoint(endpoint);
 const describeIf = endpoint ? describe : describe.skip;
 
 describeIf('S3 storage against a local S3-compatible server', () => {

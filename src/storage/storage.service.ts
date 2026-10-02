@@ -48,13 +48,18 @@ export class StorageService implements DocumentStorage {
     const accessKeyId = config.get<string>('S3_ACCESS_KEY_ID');
     const secretAccessKey = config.get<string>('S3_SECRET_ACCESS_KEY');
     if (!!accessKeyId !== !!secretAccessKey) throw new Error('Set both S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, or neither');
+    if (!accessKeyId && config.get<string>('AWS_ACCESS_KEY_ID')) {
+      // With no dedicated keys the SDK would silently use AWS_ACCESS_KEY_ID, which belongs to the
+      // face-match user and has no S3 permission. Refuse, rather than fail later with AccessDenied.
+      throw new Error('AWS_ACCESS_KEY_ID is set (used by face matching) but S3_ACCESS_KEY_ID is not: set the dedicated S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, or run storage under an IAM role without AWS_ACCESS_KEY_ID in its environment');
+    }
     const sse = config.get<string>('S3_SSE') ?? 'AES256';
     if (!['AES256', 'aws:kms', 'none'].includes(sse)) throw new Error('S3_SSE must be AES256, aws:kms or none');
 
     const client = new S3Client({
       region,
       // Dedicated S3_* keys keep storage permissions apart from the face-match user. Without them the
-      // SDK default chain applies (an IAM role in production); note it would also read AWS_ACCESS_KEY_ID.
+      // SDK default chain applies (an IAM role in production); AWS_ACCESS_KEY_ID is refused above.
       ...(accessKeyId && secretAccessKey ? { credentials: { accessKeyId, secretAccessKey } } : {}),
       ...(config.get<string>('S3_ENDPOINT') ? { endpoint: config.get<string>('S3_ENDPOINT') } : {}),
       forcePathStyle: config.get<string>('S3_FORCE_PATH_STYLE') === 'true',

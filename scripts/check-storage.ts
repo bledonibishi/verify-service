@@ -7,10 +7,16 @@
 import { randomBytes, randomUUID } from 'crypto';
 import { StorageService, StoredObjectMissingError } from '../src/storage/storage.service';
 
-try {
+import { existsSync } from 'fs';
+
+// A missing .env is fine (the real environment is used); one that exists but cannot be loaded is not,
+// because the check would then silently test the default local storage instead of your bucket.
+if (existsSync('.env')) {
+  if (typeof process.loadEnvFile !== 'function') {
+    console.error('This check needs Node 20.12 or newer to read .env');
+    process.exit(1);
+  }
   process.loadEnvFile('.env');
-} catch {
-  /* no .env: use the real environment */
 }
 
 async function step(name: string, run: () => Promise<void>): Promise<boolean> {
@@ -58,7 +64,7 @@ async function main() {
     console.log('All checks passed.');
     if (driver === 's3') console.log('Also confirm in the AWS console that bucket versioning is OFF; otherwise deleted objects survive as old versions.');
   } else {
-    console.log('Some checks failed. 403 usually means the IAM policy or bucket name is wrong; check S3_BUCKET is the full bucket name.');
+    console.log('Some checks failed. 403 usually means the IAM policy or bucket name is wrong: S3_BUCKET must be the full bucket name, and the policy needs s3:ListBucket on the bucket as well as Put/Get/DeleteObject on its objects (without it, a missing object looks like AccessDenied).');
     process.exit(1);
   }
 }

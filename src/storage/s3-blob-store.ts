@@ -28,10 +28,20 @@ export class S3BlobStore implements BlobStore {
     private readonly opts: S3Options,
   ) {
     if (!opts.bucket) throw new Error('S3_BUCKET is required when STORAGE_DRIVER=s3');
-    this.prefix = opts.prefix ? opts.prefix.replace(/^\/+|\/+$/g, '') + '/' : '';
+    this.prefix = S3BlobStore.normalizePrefix(opts.prefix);
     const mode = opts.serverSideEncryption ?? 'AES256';
     if (mode === 'aws:kms' && !opts.kmsKeyId) throw new Error('S3_KMS_KEY_ID is required for S3_SSE=aws:kms');
     this.sse = mode === 'none' ? undefined : (mode as ServerSideEncryption);
+  }
+
+  /** "" or "a/b/": no leading slash, one trailing slash, no empty, dot or parent components. */
+  static normalizePrefix(raw: string | undefined): string {
+    const trimmed = (raw ?? '').trim().replace(/^\/+|\/+$/g, '');
+    if (trimmed === '') return '';
+    if (trimmed.split('/').some((p) => p === '' || p === '.' || p === '..') || !/^[A-Za-z0-9._\/-]+$/.test(trimmed)) {
+      throw new Error('S3_KEY_PREFIX may only contain letters, digits, ".", "_", "-" and single slashes');
+    }
+    return trimmed + '/';
   }
 
   private objectKey(key: string): string {
@@ -58,8 +68,12 @@ export class S3BlobStore implements BlobStore {
       if (!res.Body) throw new StoredObjectMissingError();
       return Buffer.from(await res.Body.transformToByteArray());
     } catch (err) {
-      const e = err as { name?: string; $metadata?: { httpStatusCode?: number } };
-      if (e.name === 'NoSuchKey' || e.name === 'NotFound' || e.$metadata?.httpStatusCode === 404) throw new StoredObjectMissingError();
+      // Only errors that name a missing *object*. A 404 for a missing bucket (NoSuchBucket, a
+      // misspelled S3_BUCKET) is a configuration failure and must not look like an erased document.
+      // Note: without s3:ListBucket, S3 answers 403 AccessDenied for absent keys, which is why the
+      // documented policy includes it.
+      const name = (err as { name?: string }).name;
+      if (name === 'NoSuchKey' || name === 'NotFound') throw new StoredObjectMissingError();
       throw err;
     }
   }

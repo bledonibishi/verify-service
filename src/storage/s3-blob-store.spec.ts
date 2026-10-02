@@ -69,6 +69,32 @@ describe('S3BlobStore', () => {
     await expect(new S3BlobStore(denied as never, { bucket: 'b' }).get('a/b/c')).rejects.toMatchObject({ name: 'AccessDenied' });
   });
 
+  it('does not mistake a missing or misspelled bucket for an erased document', async () => {
+    const noBucket = { send: async () => { throw Object.assign(new Error('The specified bucket does not exist'), { name: 'NoSuchBucket', $metadata: { httpStatusCode: 404 } }); } };
+    await expect(new S3BlobStore(noBucket as never, { bucket: 'typo' }).get('a/b/c')).rejects.toMatchObject({ name: 'NoSuchBucket' });
+    // A bare 404 whose name does not say "object" is not proof either
+    const odd = { send: async () => { throw Object.assign(new Error('x'), { name: 'SomethingElse', $metadata: { httpStatusCode: 404 } }); } };
+    await expect(new S3BlobStore(odd as never, { bucket: 'b' }).get('a/b/c')).rejects.not.toBeInstanceOf(StoredObjectMissingError);
+  });
+
+  it.each([
+    ['/', ''],
+    ['//', ''],
+    ['  ', ''],
+    [undefined, ''],
+    ['prod', 'prod/'],
+    ['/prod/eu/', 'prod/eu/'],
+  ])('normalises the prefix %j to %j', async (prefix, expected) => {
+    expect(S3BlobStore.normalizePrefix(prefix)).toBe(expected);
+    const { client, objects } = fakeS3();
+    await new S3BlobStore(client, { bucket: 'b', prefix }).put('t/s/1', Buffer.from('x'));
+    expect([...objects.keys()]).toEqual([`b/${expected}t/s/1`]); // never a key that starts with a slash
+  });
+
+  it.each(['a//b', 'a/../b', './a', 'a/./b', 'a b', 'a\nb', '..'])('rejects the prefix %j', (prefix) => {
+    expect(() => S3BlobStore.normalizePrefix(prefix)).toThrow('S3_KEY_PREFIX');
+  });
+
   it('deletes idempotently, so a retried erasure can finish', async () => {
     const { client, objects } = fakeS3();
     const store = new S3BlobStore(client, { bucket: 'b' });
@@ -127,6 +153,12 @@ describe('StorageService over S3', () => {
       [{ STORAGE_DRIVER: 'floppy' }, 'STORAGE_DRIVER'],
     ])('refuses bad settings %j', (extra, message) => {
       expect(() => new StorageService(config({ ...base, ...extra }))).toThrow(message);
+    });
+    it('refuses to fall back to the face-match user’s AWS keys', () => {
+      expect(() => new StorageService(config({ ...base, AWS_ACCESS_KEY_ID: 'face-user' }))).toThrow('AWS_ACCESS_KEY_ID');
+      // Dedicated keys make that irrelevant, and so does being on a role (no AWS_ACCESS_KEY_ID at all)
+      expect(() => new StorageService(config({ ...base, AWS_ACCESS_KEY_ID: 'face-user', S3_ACCESS_KEY_ID: 'a', S3_SECRET_ACCESS_KEY: 'b' }))).not.toThrow();
+      expect(() => new StorageService(config({ ...base, AWS_ACCESS_KEY_ID: '' }))).not.toThrow();
     });
     it('keeps local disk as the default', () => {
       expect(() => new StorageService(config({ STORAGE_ENCRYPTION_KEY: KEY }))).not.toThrow();
