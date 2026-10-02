@@ -14,6 +14,8 @@ export interface WebhookEvent {
   occurredAt: string;
   /** Automated check results; present once the pipeline has run. */
   verification?: unknown;
+  /** Human review decision, present when a reviewer decided the session. */
+  review?: unknown;
 }
 
 /**

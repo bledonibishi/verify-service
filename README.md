@@ -12,7 +12,7 @@ Step 1 of the roadmap is in place: tenants, sessions, encrypted uploads, signed 
 - [x] Kosovo MRZ module: TD1 parser, check digits, OCR repair, name/DOB cross-check (`src/documents/mrz`, see [docs/kosovo-documents.md](docs/kosovo-documents.md))
 - [x] Verification pipeline: background worker reads the ID back MRZ (Tesseract), checks it against the expected identity and expiry, stores flags and issue codes
 - [ ] Driving licence field extraction
-- [ ] Admin review queue / UI (individual reviewer accounts)
+- [x] Reviewer accounts, review API and a small review UI at `/review` (see [docs/review.md](docs/review.md))
 - [x] Face match: ID portrait vs selfie behind a `FaceProvider` interface (AWS Rekognition, per-tenant threshold)
 - [x] Liveness provider layer: `LivenessProvider` interface, challenge endpoint, per-tenant minimum confidence, required for auto-approve (AWS adapter + browser widget come with the upload page)
 - [ ] Per-tenant retention, evidence export, NFC chip SDK, billing
@@ -86,6 +86,18 @@ OCR needs the `tesseract` binary on the host (`brew install tesseract` / `apt in
 `POST` to the tenant's webhook URL with JSON `{ type, sessionId, externalRef, status, occurredAt, verification }`. It is sent once the pipeline has decided (not at submit).
 
 Header `X-Verify-Signature: t=<unix>,v1=<hex>` where `v1 = HMAC-SHA256(webhookSecret, "<t>.<raw body>")`. Verify the signature and reject old timestamps.
+
+## Manual review
+
+Sessions that need a person land in a queue at `/review`. Reviewers are individual accounts belonging to one tenant, created from the command line:
+
+```bash
+pnpm reviewer create <tenantId> alice@customer.example "Alice"   # prints a one-time password
+pnpm reviewer reset alice@customer.example
+pnpm reviewer disable alice@customer.example
+```
+
+They sign in with email and password, see the documents next to what the tenant supplied and the automated results, and approve or reject (a reason is required to reject and is sent to the tenant). The decision is audit-logged and triggers the signed webhook with a `review` object `{ decision, reason, decidedAt }`; `GET /v1/sessions/:id` returns the same. Details, security model and API in [docs/review.md](docs/review.md).
 
 ## Security notes
 

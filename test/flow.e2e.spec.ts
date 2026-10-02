@@ -5,7 +5,7 @@ import { Test } from '@nestjs/testing';
 import { PrismaClient } from '@prisma/client';
 import { randomBytes } from 'crypto';
 import { createServer, Server } from 'http';
-import { mkdtempSync, readdirSync, rmSync } from 'fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'fs';
 import { AddressInfo } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -15,6 +15,7 @@ import { buildTd1, SAMPLE, Td1Fields } from '../src/documents/mrz/testing';
 import { OCR_PROVIDER, OcrProvider, OcrUnavailableError } from '../src/ocr/ocr-provider';
 import { FACE_PROVIDER, FaceComparison, FaceProvider, FaceUnavailableError } from '../src/face/face-provider';
 import { LIVENESS_PROVIDER, LivenessProvider, LivenessResult, LivenessUnavailableError } from '../src/liveness/liveness-provider';
+import { hashPassword } from '../src/review/password';
 import { VerificationWorker } from '../src/verification/verification.worker';
 
 // Fake OCR: tests set `ocrImpl`. Nothing here touches a real OCR engine.
@@ -62,6 +63,7 @@ process.env.STORAGE_LOCAL_DIR = storageDir;
 process.env.PUBLIC_BASE_URL = 'http://verify.test';
 process.env.VERIFICATION_RETRY_BASE_MS = '10';
 process.env.THROTTLE_LIMIT = '100000';
+process.env.LOGIN_RATE_LIMIT = '100000';
 process.env.VERIFICATION_POLL_MS = '50';
 
 async function waitFor(cond: () => boolean, ms = 3000) {
@@ -779,6 +781,345 @@ describe('verification flow (e2e)', () => {
         await request(http()).get(`/v1/sessions/${id}`).set('Authorization', 'Bearer vk_other2').expect(404);
       } finally {
         await prisma.tenant.delete({ where: { id: other.id } });
+      }
+    });
+  });
+
+  describe('review UI and API', () => {
+    const http = () => app.getHttpServer();
+    const PW = 'a-long-test-password-1';
+    const suffix = randomToken(6).toLowerCase().replace(/[^a-z0-9]/g, 'x');
+    const emailA = `reviewer-a-${suffix}@example.test`;
+    const emailB = `reviewer-b-${suffix}@example.test`;
+    let tenantB: string;
+    let tenantR: string;
+    const keyR = `vk_r_${suffix}`;
+    const authR = () => ({ Authorization: `Bearer ${keyR}` });
+    let reviewerA: string;
+    let cookieA: string;
+    let cookieB: string;
+
+    const cookieOf = (res: request.Response) => {
+      const raw = (res.headers['set-cookie'] as unknown as string[] | undefined)?.[0] ?? '';
+      return raw.split(';')[0];
+    };
+    const setAutoApprove = (autoApprove: boolean) => prisma.tenant.update({ where: { id: tenantR }, data: { autoApprove } });
+    const login = (email: string, password = PW) => request(http()).post('/review/api/login').send({ email, password });
+
+    async function needsReview(ref: string) {
+      const created = await request(http()).post('/v1/sessions').set(authR()).send({ externalRef: ref, firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' }).expect(201);
+      const token = created.body.uploadToken as string;
+      for (const kind of ['ID_FRONT', 'ID_BACK', 'SELFIE']) {
+        await request(http()).post(`/v1/upload/${token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+      }
+      await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
+      await request(http()).post(`/v1/upload/${token}/submit`).expect(200);
+      for (let i = 0; i < 200; i++) {
+        const row = await prisma.session.findUnique({ where: { id: created.body.id } });
+        if (row && row.status !== 'PROCESSING') break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return created.body.id as string;
+    }
+
+    beforeAll(async () => {
+      ocrImpl = async () => ({ text: mrzText() });
+      // A fresh tenant per run, so the queue only holds this run's sessions
+      const main = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+      tenantR = (
+        await prisma.tenant.create({
+          data: { name: 'review-tests', apiKeyHash: sha256(keyR), webhookUrl: main.webhookUrl, webhookSecret: main.webhookSecret },
+        })
+      ).id;
+      const b = await prisma.tenant.create({ data: { name: 'tenant-b', apiKeyHash: sha256(`vk_b_${suffix}`), webhookSecret: 'x' } });
+      tenantB = b.id;
+      const passwordHash = await hashPassword(PW);
+      reviewerA = (await prisma.reviewer.create({ data: { tenantId: tenantR, email: emailA, name: 'Reviewer A', passwordHash } })).id;
+      await prisma.reviewer.create({ data: { tenantId: tenantB, email: emailB, passwordHash } });
+      const [ra, rb] = await Promise.all([login(emailA).expect(200), login(emailB).expect(200)]);
+      cookieA = cookieOf(ra);
+      cookieB = cookieOf(rb);
+    });
+
+    afterAll(async () => {
+      ocrImpl = async () => ({ text: '' });
+      await prisma.tenant.delete({ where: { id: tenantB } }).catch(() => undefined);
+    });
+
+    it('serves a UI with no inline script and a strict CSP', async () => {
+      const page = await request(http()).get('/review').expect(200);
+      expect(page.headers['content-security-policy']).toContain("default-src 'none'");
+      expect(page.headers['content-security-policy']).toContain("script-src 'self'");
+      expect(page.headers['x-frame-options']).toBe('DENY');
+      expect(page.text).not.toMatch(/<script(?![^>]*\bsrc=)/i);
+      expect(page.text).not.toMatch(/\son\w+=/i);
+      const js = await request(http()).get('/review/app.js').expect(200);
+      expect(js.headers['content-type']).toContain('javascript');
+      expect(js.text).not.toMatch(/innerHTML|document\.write|eval\(/);
+      await request(http()).get('/review/app.css').expect(200);
+    });
+
+    it('requires a signed-in reviewer for every API route', async () => {
+      const id = '00000000-0000-4000-8000-000000000000';
+      for (const [method, path] of [
+        ['get', '/review/api/me'],
+        ['get', '/review/api/sessions'],
+        ['get', `/review/api/sessions/${id}`],
+        ['get', `/review/api/sessions/${id}/documents/SELFIE`],
+        ['post', `/review/api/sessions/${id}/decision`],
+        ['post', '/review/api/logout'],
+      ] as const) {
+        await request(http())[method](path).expect(401);
+      }
+      await request(http()).get('/review/api/me').set('Cookie', 'vr_session=forged').expect(401);
+      // Malformed percent escapes are just an invalid cookie, never a server error
+      for (const bad of ['vr_session=%', 'vr_session=%E0%A4%A', 'vr_session=%zz']) {
+        await request(http()).get('/review/api/me').set('Cookie', bad).expect(401);
+        await request(http()).post('/review/api/logout').set('Cookie', bad).expect(401);
+      }
+      // An API key is not a review login
+      await request(http()).get('/review/api/sessions').set(authR()).expect(401);
+    });
+
+    it('sets a hardened cookie and never echoes secrets', async () => {
+      const res = await login(emailA).expect(200);
+      const raw = (res.headers['set-cookie'] as unknown as string[])[0];
+      expect(raw).toMatch(/HttpOnly/i);
+      expect(raw).toMatch(/SameSite=Strict/i);
+      expect(raw).toMatch(/Path=\/review/);
+      expect(JSON.stringify(res.body)).not.toMatch(/password|hash|token/i);
+      const me = await request(http()).get('/review/api/me').set('Cookie', cookieOf(res)).expect(200);
+      expect(me.body).toEqual({ email: emailA, name: 'Reviewer A' });
+    });
+
+    it('stores only a hash of the session token and a scrypt password hash', async () => {
+      const row = await prisma.reviewer.findUnique({ where: { email: emailA } });
+      expect(row?.passwordHash.startsWith('scrypt$')).toBe(true);
+      expect(row?.passwordHash).not.toContain(PW);
+      const token = decodeURIComponent(cookieA.split('=')[1]);
+      expect(await prisma.reviewerSession.count({ where: { tokenHash: sha256(token) } })).toBe(1);
+      expect(await prisma.reviewerSession.count({ where: { tokenHash: token } })).toBe(0);
+    });
+
+    it('gives the same generic error for unknown, wrong-password and disabled accounts', async () => {
+      const disabled = `disabled-${suffix}@example.test`;
+      await prisma.reviewer.create({ data: { tenantId, email: disabled, passwordHash: await hashPassword(PW), disabled: true } });
+      const bodies = await Promise.all([
+        login(`nobody-${suffix}@example.test`).expect(401),
+        login(emailA, 'wrong-password-123').expect(401),
+        login(disabled).expect(401),
+      ]);
+      expect(new Set(bodies.map((r) => JSON.stringify(r.body))).size).toBe(1);
+      expect(bodies[0].body.message).toBe('Invalid email or password');
+      expect(bodies.every((r) => !r.headers['set-cookie'])).toBe(true);
+    });
+
+    it('locks an account after repeated failures, even for the right password', async () => {
+      const email = `lock-${suffix}@example.test`;
+      await prisma.reviewer.create({ data: { tenantId, email, passwordHash: await hashPassword(PW) } });
+      for (let i = 0; i < 5; i++) await login(email, 'wrong-password-123').expect(401);
+      const locked = await login(email).expect(401);
+      expect(locked.body.message).toBe('Invalid email or password');
+      expect((await prisma.reviewer.findUnique({ where: { email } }))?.lockedUntil).not.toBeNull();
+      await prisma.reviewer.update({ where: { email }, data: { lockedUntil: null } });
+      await login(email).expect(200);
+    });
+
+    it('counts failures atomically: parallel wrong guesses still lock the account', async () => {
+      const email = `parallel-${suffix}@example.test`;
+      await prisma.reviewer.create({ data: { tenantId, email, passwordHash: await hashPassword(PW) } });
+      await Promise.all(Array.from({ length: 5 }, () => login(email, 'wrong-password-123').expect(401)));
+      expect((await prisma.reviewer.findUnique({ where: { email } }))?.lockedUntil).not.toBeNull();
+    });
+
+    it('approves with a blank reason treated as no reason', async () => {
+      const id = await needsReview('blank-reason');
+      await request(http()).post(`/review/api/sessions/${id}/decision`).set('Cookie', cookieA).send({ decision: 'APPROVED', reason: '   ' }).expect(200);
+      expect((await prisma.session.findUnique({ where: { id } }))?.reviewReason).toBeNull();
+    });
+
+    it('refuses cross-origin logins and decisions', async () => {
+      await login(emailA).set('Origin', 'https://evil.example').expect(403);
+      const id = await needsReview('csrf');
+      await request(http()).post(`/review/api/sessions/${id}/decision`).set('Cookie', cookieA).set('Origin', 'https://evil.example').send({ decision: 'APPROVED' }).expect(403);
+      expect((await prisma.session.findUnique({ where: { id } }))?.status).toBe('NEEDS_REVIEW');
+      // Same-origin requests carry an Origin that matches the host
+      await request(http()).get('/review/api/me').set('Cookie', cookieA).expect(200);
+    });
+
+    it('shows each reviewer only their own tenant’s queue, details and documents', async () => {
+      const id = await needsReview('isolation-queue');
+      const mine = await request(http()).get('/review/api/sessions').set('Cookie', cookieA).expect(200);
+      expect(mine.body.items.map((i: { id: string }) => i.id)).toContain(id);
+      const theirs = await request(http()).get('/review/api/sessions').set('Cookie', cookieB).expect(200);
+      expect(theirs.body.items.map((i: { id: string }) => i.id)).not.toContain(id);
+
+      await request(http()).get(`/review/api/sessions/${id}`).set('Cookie', cookieB).expect(404);
+      await request(http()).get(`/review/api/sessions/${id}/documents/SELFIE`).set('Cookie', cookieB).expect(404);
+      await request(http()).post(`/review/api/sessions/${id}/decision`).set('Cookie', cookieB).send({ decision: 'APPROVED' }).expect(404);
+      expect((await prisma.session.findUnique({ where: { id } }))?.status).toBe('NEEDS_REVIEW');
+      expect(await prisma.auditLog.count({ where: { sessionId: id, event: { startsWith: 'review.' } } })).toBe(0);
+    });
+
+    it('lists only sessions waiting for review, oldest first, with pagination', async () => {
+      const ids = [await needsReview('page-1'), await needsReview('page-2')];
+      const page1 = await request(http()).get('/review/api/sessions').set('Cookie', cookieA).expect(200);
+      const order = page1.body.items.map((i: { id: string }) => i.id);
+      expect(order.indexOf(ids[0])).toBeLessThan(order.indexOf(ids[1]));
+      await request(http()).get('/review/api/sessions?cursor=not-a-uuid').set('Cookie', cookieA).expect(400);
+      await setAutoApprove(true);
+      const auto = await needsReview('auto-approved'); // approved by the pipeline: must not be queued
+      await setAutoApprove(false);
+      const all = await request(http()).get('/review/api/sessions').set('Cookie', cookieA).expect(200);
+      expect(all.body.items.map((i: { id: string }) => i.id)).not.toContain(auto);
+    });
+
+    it('shows the reviewer the expected data and check results', async () => {
+      const id = await needsReview('detail');
+      const res = await request(http()).get(`/review/api/sessions/${id}`).set('Cookie', cookieA).expect(200);
+      expect(res.body).toMatchObject({
+        id,
+        status: 'NEEDS_REVIEW',
+        expected: { firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' },
+        documents: expect.arrayContaining(['ID_FRONT', 'ID_BACK', 'SELFIE']),
+        verification: { mrz: { found: true, valid: true } },
+        review: null,
+      });
+    });
+
+    it('decrypts documents on the fly, never writing them to disk, and audit-logs the view', async () => {
+      const id = await needsReview('docs');
+      const clear = 'fake-image-body';
+      const scan = () => {
+        const walk = (dir: string): string[] =>
+          readdirSync(dir).flatMap((n) => {
+            const f = join(dir, n);
+            return statSync(f).isDirectory() ? walk(f) : [f];
+          });
+        return walk(storageDir).filter((f) => readFileSync(f).includes(Buffer.from(clear)));
+      };
+      expect(scan()).toEqual([]);
+      const res = await request(http()).get(`/review/api/sessions/${id}/documents/SELFIE`).set('Cookie', cookieA).buffer(true).parse((r, cb) => {
+        const chunks: Buffer[] = [];
+        r.on('data', (c: Buffer) => chunks.push(c));
+        r.on('end', () => cb(null, Buffer.concat(chunks)));
+      }).expect(200);
+      expect(Buffer.compare(res.body as Buffer, PNG)).toBe(0);
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+      expect(res.headers['content-type']).toContain('image/png');
+      expect(scan()).toEqual([]);
+      const log = await prisma.auditLog.findFirst({ where: { sessionId: id, event: 'review.document_viewed' } });
+      expect(log?.detail).toEqual({ kind: 'SELFIE', reviewerId: reviewerA });
+      await request(http()).get(`/review/api/sessions/${id}/documents/NOT_A_KIND`).set('Cookie', cookieA).expect(400);
+    });
+
+    it('approves with an audit trail, a signed webhook and the decision visible to the tenant', async () => {
+      const id = await needsReview('approve');
+      const before = hooks.length;
+      const res = await request(http()).post(`/review/api/sessions/${id}/decision`).set('Cookie', cookieA).send({ decision: 'APPROVED' }).expect(200);
+      expect(res.body).toEqual({ status: 'APPROVED' });
+      const row = await prisma.session.findUnique({ where: { id } });
+      expect(row).toMatchObject({ status: 'APPROVED', reviewedById: reviewerA, reviewReason: null });
+      const log = await prisma.auditLog.findFirst({ where: { sessionId: id, event: 'review.decided' } });
+      expect(log?.detail).toEqual({ decision: 'APPROVED', reviewerId: reviewerA, hasReason: false });
+
+      await waitFor(() => hooks.length > before);
+      const hook = hooks[hooks.length - 1];
+      const m = hook.signature.match(/^t=(\d+),v1=([0-9a-f]+)$/)!;
+      expect(m[2]).toBe(hmacSign(webhookSecret, `${m[1]}.${hook.body}`));
+      expect(JSON.parse(hook.body)).toMatchObject({ sessionId: id, status: 'APPROVED', review: { decision: 'APPROVED', reason: null }, verification: { mrz: { found: true } } });
+
+      const api = await request(http()).get(`/v1/sessions/${id}`).set(authR()).expect(200);
+      expect(api.body.status).toBe('APPROVED');
+      expect(api.body.review).toMatchObject({ decision: 'APPROVED', reason: null });
+      // The reviewer's identity is not shared with the tenant's API
+      expect(JSON.stringify(api.body)).not.toContain(reviewerA);
+    });
+
+    it('requires a reason to reject, stores it, and tells the tenant', async () => {
+      const id = await needsReview('reject');
+      const post = (body: object) => request(http()).post(`/review/api/sessions/${id}/decision`).set('Cookie', cookieA).send(body);
+      await post({ decision: 'REJECTED' }).expect(400);
+      await post({ decision: 'REJECTED', reason: '  ' }).expect(400);
+      await post({ decision: 'MAYBE' }).expect(400);
+      await post({ decision: 'APPROVED', extra: 1 }).expect(400);
+      // Padding can't satisfy the minimum: the trimmed reason is what counts
+      await post({ decision: 'REJECTED', reason: '  x ' }).expect(400);
+      await post({ decision: 'REJECTED', reason: ' ab  ' }).expect(400);
+      await post({ decision: 'REJECTED', reason: 'x'.repeat(501) }).expect(400);
+      expect((await prisma.session.findUnique({ where: { id } }))?.status).toBe('NEEDS_REVIEW');
+      const before = hooks.length;
+      await post({ decision: 'REJECTED', reason: 'Photo does not match the document' }).expect(200);
+      await waitFor(() => hooks.length > before);
+      expect(JSON.parse(hooks[hooks.length - 1].body)).toMatchObject({ status: 'REJECTED', review: { reason: 'Photo does not match the document' } });
+      const log = await prisma.auditLog.findFirst({ where: { sessionId: id, event: 'review.decided' } });
+      // The free-text reason lives on the session, never in the audit log
+      expect(JSON.stringify(log?.detail)).not.toContain('Photo');
+    });
+
+    it('lets only one of several concurrent decisions through, with one webhook', async () => {
+      const id = await needsReview('race-decide');
+      const before = hooks.length;
+      const results = await Promise.all(
+        ['APPROVED', 'REJECTED', 'APPROVED', 'REJECTED'].map((decision) =>
+          request(http()).post(`/review/api/sessions/${id}/decision`).set('Cookie', cookieA).send({ decision, reason: 'because' }),
+        ),
+      );
+      expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+      expect(results.filter((r) => r.status === 409)).toHaveLength(3);
+      const winner = results.find((r) => r.status === 200)!.body.status;
+      expect((await prisma.session.findUnique({ where: { id } }))?.status).toBe(winner);
+      expect(await prisma.auditLog.count({ where: { sessionId: id, event: 'review.decided' } })).toBe(1);
+      await waitFor(() => hooks.length > before);
+      await new Promise((r) => setTimeout(r, 200));
+      expect(hooks.length - before).toBe(1);
+    });
+
+    it('refuses decisions on sessions that are not waiting for review', async () => {
+      await setAutoApprove(true);
+      const auto = await needsReview('auto-then-decide');
+      await setAutoApprove(false);
+      expect((await prisma.session.findUnique({ where: { id: auto } }))?.status).toBe('APPROVED');
+      await request(http()).post(`/review/api/sessions/${auto}/decision`).set('Cookie', cookieA).send({ decision: 'REJECTED', reason: 'changed my mind' }).expect(409);
+      expect((await prisma.session.findUnique({ where: { id: auto } }))?.status).toBe('APPROVED');
+      const pending = await request(http()).post('/v1/sessions').set(authR()).send({ externalRef: 'still-pending' }).expect(201);
+      await request(http()).post(`/review/api/sessions/${pending.body.id}/decision`).set('Cookie', cookieA).send({ decision: 'APPROVED' }).expect(409);
+    });
+
+    it('ends access on logout, expiry, idle timeout and disabling', async () => {
+      const mk = async (email: string) => {
+        await prisma.reviewer.upsert({ where: { email }, update: {}, create: { tenantId, email, passwordHash: await hashPassword(PW) } });
+        const res = await login(email).expect(200);
+        return { cookie: cookieOf(res), token: decodeURIComponent(cookieOf(res).split('=')[1]) };
+      };
+      const out = await mk(`logout-${suffix}@example.test`);
+      await request(http()).post('/review/api/logout').set('Cookie', out.cookie).expect(204);
+      await request(http()).get('/review/api/me').set('Cookie', out.cookie).expect(401);
+
+      const exp = await mk(`expiry-${suffix}@example.test`);
+      await prisma.reviewerSession.update({ where: { tokenHash: sha256(exp.token) }, data: { expiresAt: new Date(Date.now() - 1000) } });
+      await request(http()).get('/review/api/me').set('Cookie', exp.cookie).expect(401);
+
+      const idle = await mk(`idle-${suffix}@example.test`);
+      await prisma.reviewerSession.update({ where: { tokenHash: sha256(idle.token) }, data: { lastSeenAt: new Date(Date.now() - 2 * 3600_000) } });
+      await request(http()).get('/review/api/me').set('Cookie', idle.cookie).expect(401);
+
+      const dis = await mk(`disable-${suffix}@example.test`);
+      await request(http()).get('/review/api/me').set('Cookie', dis.cookie).expect(200);
+      await prisma.reviewer.update({ where: { email: `disable-${suffix}@example.test` }, data: { disabled: true } });
+      await request(http()).get('/review/api/me').set('Cookie', dis.cookie).expect(401);
+    });
+
+    it('rate-limits login attempts per IP', async () => {
+      const normal = process.env.LOGIN_RATE_LIMIT;
+      process.env.LOGIN_RATE_LIMIT = '2';
+      try {
+        const codes: number[] = [];
+        for (let i = 0; i < 6; i++) codes.push((await login(`nobody-${suffix}@example.test`, 'x')).status);
+        expect(codes).toContain(429);
+      } finally {
+        process.env.LOGIN_RATE_LIMIT = normal;
       }
     });
   });
