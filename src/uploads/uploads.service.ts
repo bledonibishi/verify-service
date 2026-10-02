@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 import { sha256 } from '../common/crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
-import { WebhooksService } from '../webhooks/webhooks.service';
+import { VerificationWorker } from '../verification/verification.worker';
 import { detectImageType } from './image-type';
 
 @Injectable()
@@ -12,7 +12,7 @@ export class UploadsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
-    private readonly webhooks: WebhooksService,
+    private readonly worker: VerificationWorker,
   ) {}
 
   /** Resolves a still-open session from its upload token. */
@@ -75,8 +75,8 @@ export class UploadsService {
   }
 
   /**
-   * Marks the session as submitted. Automated checks arrive in a later step; until then every
-   * submission goes to the manual review queue.
+   * Marks the session as submitted and queues the automated checks. The HTTP request returns
+   * straight away; the worker decides the outcome and sends the webhook.
    */
   async submit(token: string) {
     const session = await this.openSession(token);
@@ -85,22 +85,19 @@ export class UploadsService {
       throw new BadRequestException('ID_FRONT and SELFIE are required before submitting');
     }
 
-    // Atomic claim: only one concurrent submit can move the session out of PENDING.
-    const claimed = await this.prisma.session.updateMany({
-      where: { id: session.id, status: SessionStatus.PENDING, expiresAt: { gt: new Date() } },
-      data: { status: SessionStatus.NEEDS_REVIEW },
+    // Atomic claim: only one concurrent submit can move the session out of PENDING. The job is
+    // created in the same transaction so a PROCESSING session can never lack its job.
+    await this.prisma.$transaction(async (tx) => {
+      const claimed = await tx.session.updateMany({
+        where: { id: session.id, status: SessionStatus.PENDING, expiresAt: { gt: new Date() } },
+        data: { status: SessionStatus.PROCESSING },
+      });
+      if (claimed.count === 0) throw new GoneException('Session already submitted or expired');
+      await tx.verificationJob.create({ data: { sessionId: session.id } });
+      await tx.auditLog.create({ data: { sessionId: session.id, event: 'session.submitted' } });
     });
-    if (claimed.count === 0) throw new GoneException('Session already submitted or expired');
-    await this.prisma.auditLog.create({ data: { sessionId: session.id, event: 'session.submitted' } });
 
-    // Fire and forget: a slow tenant endpoint must not hold up the user's request.
-    void this.webhooks.send(session.tenant, {
-      type: 'session.status_changed',
-      sessionId: session.id,
-      externalRef: session.externalRef,
-      status: SessionStatus.NEEDS_REVIEW,
-      occurredAt: new Date().toISOString(),
-    });
-    return { status: SessionStatus.NEEDS_REVIEW };
+    void this.worker.wake();
+    return { status: SessionStatus.PROCESSING };
   }
 }

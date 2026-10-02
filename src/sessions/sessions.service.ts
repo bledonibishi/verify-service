@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Tenant } from '@prisma/client';
 import { randomToken, sha256 } from '../common/crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { toSummary } from '../verification/summary';
 import { CreateSessionDto } from './sessions.dto';
 
 @Injectable()
@@ -43,7 +44,7 @@ export class SessionsService {
   async get(tenant: Tenant, id: string) {
     const session = await this.prisma.session.findFirst({
       where: { id, tenantId: tenant.id },
-      include: { documents: { select: { kind: true } } },
+      include: { documents: { select: { kind: true } }, result: true },
     });
     if (!session) throw new NotFoundException('Session not found');
     // Expiry is only persisted when someone touches the upload link, so report it here too.
@@ -54,6 +55,7 @@ export class SessionsService {
       status: expired ? 'EXPIRED' : session.status,
       expiresAt: session.expiresAt,
       uploaded: session.documents.map((d) => d.kind),
+      verification: session.result ? toSummary(session.result) : null,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
     };

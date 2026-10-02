@@ -12,6 +12,8 @@ export interface WebhookEvent {
   externalRef: string;
   status: string;
   occurredAt: string;
+  /** Automated check results; present once the pipeline has run. */
+  verification?: unknown;
 }
 
 /**

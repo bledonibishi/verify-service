@@ -28,6 +28,9 @@ model Tenant {
   apiKeyHash    String    @unique @map("api_key_hash")
   webhookUrl    String?   @map("webhook_url")
   webhookSecret String    @map("webhook_secret")
+  // When true, a submission whose automated checks all pass cleanly is approved without a
+  // reviewer. Off by default: every submission then goes to manual review.
+  autoApprove   Boolean   @default(false) @map("auto_approve")
   createdAt     DateTime  @default(now()) @map("created_at")
   sessions      Session[]
 
@@ -51,6 +54,8 @@ model Session {
   updatedAt   DateTime      @updatedAt @map("updated_at")
   documents   Document[]
   auditLogs   AuditLog[]
+  job         VerificationJob?
+  result      VerificationResult?
 
   @@index([tenantId, externalRef])
   @@map("sessions")
@@ -80,4 +85,53 @@ model AuditLog {
 
   @@index([sessionId])
   @@map("audit_logs")
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  DONE
+}
+
+// Postgres-backed work queue: one job per submitted session. Workers claim rows with
+// FOR UPDATE SKIP LOCKED; a RUNNING job whose lease has lapsed is picked up again.
+model VerificationJob {
+  id          String    @id @default(uuid())
+  sessionId   String    @unique @map("session_id")
+  session     Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  status      JobStatus @default(QUEUED)
+  attempts    Int       @default(0)
+  runAfter    DateTime  @default(now()) @map("run_after")
+  lockedUntil DateTime? @map("locked_until")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([status, runAfter])
+  @@map("verification_jobs")
+}
+
+// Outcome of the automated checks. Holds pass/fail flags and issue codes only: no names, dates,
+// document numbers or personal numbers read from the document.
+model VerificationResult {
+  id              String   @id @default(uuid())
+  sessionId       String   @unique @map("session_id")
+  session         Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  // Status the pipeline moved the session to (APPROVED or NEEDS_REVIEW)
+  decision        String
+  autoDecided     Boolean  @map("auto_decided")
+  mrzFound        Boolean  @map("mrz_found")
+  mrzValid        Boolean  @map("mrz_valid")
+  ocrRepaired     Boolean  @map("ocr_repaired")
+  // match | mismatch | not_provided; null when the MRZ could not be read
+  surnameMatch    String?  @map("surname_match")
+  givenNamesMatch String?  @map("given_names_match")
+  birthDateMatch  String?  @map("birth_date_match")
+  expired         Boolean?
+  // [{ field, ok }] for each MRZ check digit
+  checks          Json
+  issueCodes      String[] @map("issue_codes")
+  ocrProvider     String   @map("ocr_provider")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  @@map("verification_results")
 }

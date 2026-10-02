@@ -11,11 +11,29 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import request from 'supertest';
 import { hmacSign, randomToken, sha256 } from '../src/common/crypto';
+import { buildTd1, SAMPLE, Td1Fields } from '../src/documents/mrz/testing';
+import { OCR_PROVIDER, OcrProvider, OcrUnavailableError } from '../src/ocr/ocr-provider';
+import { VerificationWorker } from '../src/verification/verification.worker';
+
+// Fake OCR: tests set `ocrImpl`. Nothing here touches a real OCR engine.
+let ocrImpl: () => Promise<{ text: string }> = async () => ({ text: '' });
+let ocrCalls = 0;
+const fakeOcr: OcrProvider = {
+  name: 'fake',
+  readText: async () => {
+    ocrCalls++;
+    return ocrImpl();
+  },
+};
+const mrzText = (f: Partial<Td1Fields> = {}) => buildTd1({ ...SAMPLE, ...f }).join('\n');
 
 const storageDir = mkdtempSync(join(tmpdir(), 'verify-e2e-'));
 process.env.STORAGE_ENCRYPTION_KEY = randomBytes(32).toString('base64');
 process.env.STORAGE_LOCAL_DIR = storageDir;
 process.env.PUBLIC_BASE_URL = 'http://verify.test';
+process.env.VERIFICATION_RETRY_BASE_MS = '10';
+process.env.THROTTLE_LIMIT = '100000';
+process.env.VERIFICATION_POLL_MS = '50';
 
 async function waitFor(cond: () => boolean, ms = 3000) {
   const end = Date.now() + ms;
@@ -35,6 +53,7 @@ describe('verification flow (e2e)', () => {
   const apiKey = `vk_${randomToken()}`;
   const webhookSecret = `whsec_${randomToken()}`;
   let tenantId: string;
+  let worker: VerificationWorker;
 
   beforeAll(async () => {
     hookServer = createServer((req, res) => {
@@ -60,7 +79,11 @@ describe('verification flow (e2e)', () => {
     tenantId = tenant.id;
 
     const { AppModule } = await import('../src/app.module');
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      .overrideProvider(OCR_PROVIDER)
+      .useValue(fakeOcr)
+      .compile();
+    worker = moduleRef.get(VerificationWorker);
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     await app.init();
@@ -119,7 +142,7 @@ describe('verification flow (e2e)', () => {
     expect(mid.body.uploaded.sort()).toEqual(['ID_FRONT', 'SELFIE']);
 
     const submitted = await request(http).post(`/v1/upload/${token}/submit`).expect(200);
-    expect(submitted.body.status).toBe('NEEDS_REVIEW');
+    expect(submitted.body.status).toBe('PROCESSING');
 
     // Session is closed to further uploads
     await request(http)
@@ -127,11 +150,13 @@ describe('verification flow (e2e)', () => {
       .attach('file', PNG, { filename: 'again.png' })
       .expect(410);
 
+    // No ID_BACK was uploaded, so the pipeline cannot read an MRZ and hands over to a reviewer
+    await waitFor(() => hooks.length >= 1);
     const done = await request(http).get(`/v1/sessions/${id}`).set(auth()).expect(200);
     expect(done.body.status).toBe('NEEDS_REVIEW');
+    expect(done.body.verification.issues).toEqual(['ID_BACK_MISSING']);
 
     // Webhook is sent after the response, so wait for it to arrive
-    await waitFor(() => hooks.length >= 1);
 
     // Webhook was delivered with a valid signature
     expect(hooks).toHaveLength(1);
@@ -143,6 +168,7 @@ describe('verification flow (e2e)', () => {
       sessionId: id,
       externalRef: 'user-42',
       status: 'NEEDS_REVIEW',
+      verification: { mrz: { found: false }, issues: ['ID_BACK_MISSING'] },
     });
   });
 
@@ -202,7 +228,7 @@ describe('verification flow (e2e)', () => {
     await prisma.session.update({ where: { id }, data: { expiresAt: new Date(Date.now() - 1000) } });
     await request(app.getHttpServer()).post(`/v1/upload/${token}/SELFIE`).attach('file', PNG, { filename: 'x.png' }).expect(410);
     const row = await prisma.session.findUnique({ where: { id } });
-    expect(row?.status).toBe('NEEDS_REVIEW');
+    expect(['PROCESSING', 'NEEDS_REVIEW']).toContain(row?.status);
   });
 
   it('leaves no stored file behind when an upload is refused', async () => {
@@ -227,5 +253,248 @@ describe('verification flow (e2e)', () => {
       .post('/v1/upload/not-a-real-token/SELFIE')
       .attach('file', PNG, { filename: 's.png' })
       .expect(404);
+  });
+
+  describe('verification pipeline', () => {
+    const http = () => app.getHttpServer();
+
+    async function submitted(
+      ref: string,
+      identity: { firstName?: string; lastName?: string; birthDate?: string } | null = { firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' },
+      withBack = true,
+    ) {
+      const created = await request(http()).post('/v1/sessions').set(auth()).send({ externalRef: ref, ...identity }).expect(201);
+      const token = created.body.uploadToken as string;
+      const kinds = withBack ? ['ID_FRONT', 'ID_BACK', 'SELFIE'] : ['ID_FRONT', 'SELFIE'];
+      for (const kind of kinds) {
+        await request(http()).post(`/v1/upload/${token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+      }
+      await request(http()).post(`/v1/upload/${token}/submit`).expect(200);
+      return created.body.id as string;
+    }
+
+    async function settled(id: string) {
+      for (let i = 0; i < 200; i++) {
+        const res = await request(http()).get(`/v1/sessions/${id}`).set(auth());
+        if (res.body.status !== 'PROCESSING') return res.body;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      throw new Error('session stayed in PROCESSING');
+    }
+
+    const setAutoApprove = (autoApprove: boolean) => prisma.tenant.update({ where: { id: tenantId }, data: { autoApprove } });
+    afterEach(async () => {
+      await setAutoApprove(false);
+      ocrImpl = async () => ({ text: '' });
+    });
+
+    it('keeps a clean match in NEEDS_REVIEW when auto-approve is off (the default)', async () => {
+      ocrImpl = async () => ({ text: mrzText() });
+      const body = await settled(await submitted('clean-off'));
+      expect(body.status).toBe('NEEDS_REVIEW');
+      expect(body.verification).toMatchObject({
+        autoDecided: false,
+        mrz: { found: true, valid: true, repaired: false },
+        identity: { surname: 'match', givenNames: 'match', birthDate: 'match' },
+        expired: false,
+        issues: [],
+      });
+    });
+
+    it('approves a clean match when the tenant opted in, and the webhook carries the result', async () => {
+      await setAutoApprove(true);
+      ocrImpl = async () => ({ text: mrzText() });
+      const before = hooks.length;
+      const id = await submitted('clean-on');
+      expect((await settled(id)).status).toBe('APPROVED');
+      await waitFor(() => hooks.length > before);
+      const last = JSON.parse(hooks[hooks.length - 1].body);
+      expect(last).toMatchObject({ sessionId: id, status: 'APPROVED', verification: { autoDecided: true, issues: [] } });
+    });
+
+    it('never stores or returns values read from the card', async () => {
+      ocrImpl = async () => ({ text: mrzText() });
+      const id = await submitted('no-pii');
+      const body = await settled(id);
+      const row = await prisma.verificationResult.findUnique({ where: { sessionId: id } });
+      const dump = JSON.stringify([body, row]);
+      for (const secret of [SAMPLE.personalNumber, SAMPLE.documentNumber, SAMPLE.surname, SAMPLE.givenNames, SAMPLE.birth]) {
+        expect(dump).not.toContain(secret);
+      }
+      const logs = await prisma.auditLog.findMany({ where: { sessionId: id } });
+      expect(JSON.stringify(logs)).not.toContain(SAMPLE.surname);
+    });
+
+    it.each([
+      ['a different surname', { lastName: 'Other' }, 'SURNAME_MISMATCH'],
+      ['a different date of birth', { birthDate: '1991-01-01' }, 'BIRTH_DATE_MISMATCH'],
+      ['a missing expected identity', null, 'EXPECTED_IDENTITY_MISSING'],
+    ])('sends %s to review even with auto-approve on', async (_name, identity, code) => {
+      await setAutoApprove(true);
+      ocrImpl = async () => ({ text: mrzText() });
+      const base = { firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' };
+      const body = await settled(await submitted(`mismatch-${code}`, identity === null ? null : { ...base, ...identity }));
+      expect(body.status).toBe('NEEDS_REVIEW');
+      expect(body.verification.issues).toContain(code);
+    });
+
+    it('sends an expired document to review even with auto-approve on', async () => {
+      await setAutoApprove(true);
+      ocrImpl = async () => ({ text: mrzText({ expiry: '200131' }) });
+      const body = await settled(await submitted('expired'));
+      expect(body.status).toBe('NEEDS_REVIEW');
+      expect(body.verification.expired).toBe(true);
+      expect(body.verification.issues).toContain('DOCUMENT_EXPIRED');
+    });
+
+    it('sends unreadable and tampered MRZ text to review', async () => {
+      await setAutoApprove(true);
+      ocrImpl = async () => ({ text: 'no machine readable zone here' });
+      const none = await settled(await submitted('no-mrz'));
+      expect(none.status).toBe('NEEDS_REVIEW');
+      expect(none.verification.issues).toEqual(['MRZ_NOT_FOUND']);
+
+      const lines = buildTd1(SAMPLE);
+      lines[1] = lines[1].slice(0, 5) + '9' + lines[1].slice(6); // breaks the birth-date check digit
+      ocrImpl = async () => ({ text: lines.join('\n') });
+      const bad = await settled(await submitted('tampered'));
+      expect(bad.status).toBe('NEEDS_REVIEW');
+      expect(bad.verification.mrz).toMatchObject({ found: true, valid: false });
+    });
+
+    it('does not block the submit request on OCR', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      ocrImpl = async () => {
+        await gate;
+        return { text: mrzText() };
+      };
+      const id = await submitted('slow'); // submitted() only returns once the HTTP call has
+      expect((await request(http()).get(`/v1/sessions/${id}`).set(auth())).body.status).toBe('PROCESSING');
+      release();
+      expect((await settled(id)).status).toBe('NEEDS_REVIEW');
+    });
+
+    it('retries a transient OCR failure, then gives up to a reviewer after three attempts', async () => {
+      let n = 0;
+      ocrImpl = async () => {
+        if (++n < 3) throw new Error('boom');
+        return { text: mrzText() };
+      };
+      expect((await settled(await submitted('flaky'))).verification.mrz.valid).toBe(true);
+      expect(n).toBe(3);
+
+      ocrImpl = async () => {
+        throw new Error('always');
+      };
+      const body = await settled(await submitted('broken'));
+      expect(body.status).toBe('NEEDS_REVIEW');
+      expect(body.verification.issues).toEqual(['PIPELINE_ERROR']);
+    });
+
+    it('hands over immediately, without retries, when no OCR engine is installed', async () => {
+      const before = ocrCalls;
+      ocrImpl = async () => {
+        throw new OcrUnavailableError('missing');
+      };
+      const body = await settled(await submitted('no-engine'));
+      expect(body.verification.issues).toEqual(['OCR_UNAVAILABLE']);
+      expect(ocrCalls - before).toBe(1);
+    });
+
+    it('processes a job exactly once when workers race', async () => {
+      ocrImpl = async () => {
+        await new Promise((r) => setTimeout(r, 50));
+        return { text: mrzText() };
+      };
+      const before = ocrCalls;
+      const id = await submitted('race-workers');
+      await Promise.all([worker.tick(), worker.tick(), worker.tick()]);
+      await settled(id);
+      expect(ocrCalls - before).toBe(1);
+      expect(await prisma.verificationResult.count({ where: { sessionId: id } })).toBe(1);
+    });
+
+    it('picks up a job whose worker died mid-run', async () => {
+      ocrImpl = async () => ({ text: mrzText() });
+      const id = await submitted('crashed');
+      await settled(id);
+      // Simulate a crash: session back in PROCESSING with a RUNNING job whose lease has lapsed.
+      await prisma.verificationResult.delete({ where: { sessionId: id } });
+      await prisma.session.update({ where: { id }, data: { status: 'PROCESSING' } });
+      await prisma.verificationJob.update({
+        where: { sessionId: id },
+        data: { status: 'RUNNING', lockedUntil: new Date(Date.now() - 1000) },
+      });
+      await worker.wake();
+      expect((await settled(id)).verification).not.toBeNull();
+    });
+
+    it('does not let a late worker overwrite a session someone else already decided', async () => {
+      const id = await submitted('decided');
+      await settled(id);
+      await prisma.session.update({ where: { id }, data: { status: 'REJECTED' } });
+      await prisma.verificationResult.delete({ where: { sessionId: id } });
+      await prisma.verificationJob.update({ where: { sessionId: id }, data: { status: 'QUEUED', runAfter: new Date() } });
+      await worker.wake();
+      expect((await prisma.session.findUnique({ where: { id } }))?.status).toBe('REJECTED');
+      expect(await prisma.verificationResult.count({ where: { sessionId: id } })).toBe(0);
+    });
+
+    it('ignores a stale worker whose lease lapsed and was re-claimed (fenced)', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let n = 0;
+      const before = ocrCalls;
+      ocrImpl = async () => {
+        if (++n === 1) {
+          await gate; // worker A hangs here
+          throw new Error('late failure'); // ...and fails after losing its lease
+        }
+        return { text: mrzText() };
+      };
+      const id = await submitted('stale');
+      await waitFor(() => ocrCalls - before >= 1);
+      await prisma.verificationJob.update({ where: { sessionId: id }, data: { lockedUntil: new Date(Date.now() - 1000) } });
+      void worker.wake(); // worker B re-claims and finishes (A is still blocked, so don't await)
+      expect((await settled(id)).verification.mrz.valid).toBe(true);
+      release();
+      await new Promise((r) => setTimeout(r, 300)); // let A's failure path run
+      const job = await prisma.verificationJob.findUnique({ where: { sessionId: id } });
+      expect(job).toMatchObject({ status: 'DONE', attempts: 2 }); // A did not requeue B's finished job
+      expect(ocrCalls - before).toBe(2);
+      expect(await prisma.verificationResult.count({ where: { sessionId: id } })).toBe(1);
+    });
+
+    it('does not let one slow OCR call block other sessions', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let n = 0;
+      ocrImpl = async () => {
+        if (++n === 1) await gate;
+        return { text: mrzText() };
+      };
+      const slow = await submitted('slow-one');
+      await waitFor(() => n >= 1);
+      const fast = await submitted('fast-one');
+      expect((await settled(fast)).status).toBe('NEEDS_REVIEW');
+      expect((await request(http()).get(`/v1/sessions/${slow}`).set(auth())).body.status).toBe('PROCESSING');
+      release();
+      expect((await settled(slow)).status).toBe('NEEDS_REVIEW');
+    });
+
+    it('does not expose another tenant’s verification result', async () => {
+      ocrImpl = async () => ({ text: mrzText() });
+      const id = await submitted('isolation');
+      await settled(id);
+      const other = await prisma.tenant.create({
+        data: { name: 'other-2', apiKeyHash: sha256('vk_other2'), webhookSecret: 'x' },
+      });
+      try {
+        await request(http()).get(`/v1/sessions/${id}`).set('Authorization', 'Bearer vk_other2').expect(404);
+      } finally {
+        await prisma.tenant.delete({ where: { id: other.id } });
+      }
+    });
   });
 });
