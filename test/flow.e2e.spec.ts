@@ -14,6 +14,7 @@ import { hmacSign, randomToken, sha256 } from '../src/common/crypto';
 import { buildTd1, SAMPLE, Td1Fields } from '../src/documents/mrz/testing';
 import { OCR_PROVIDER, OcrProvider, OcrUnavailableError } from '../src/ocr/ocr-provider';
 import { FACE_PROVIDER, FaceComparison, FaceProvider, FaceUnavailableError } from '../src/face/face-provider';
+import { LIVENESS_PROVIDER, LivenessProvider, LivenessResult, LivenessUnavailableError } from '../src/liveness/liveness-provider';
 import { VerificationWorker } from '../src/verification/verification.worker';
 
 // Fake OCR: tests set `ocrImpl`. Nothing here touches a real OCR engine.
@@ -30,11 +31,27 @@ const fakeOcr: OcrProvider = {
 const goodFace = async (): Promise<FaceComparison> => ({ status: 'compared', similarity: 95 });
 let faceImpl: () => Promise<FaceComparison> = goodFace;
 let faceCalls = 0;
+let lastSelfie: Buffer | undefined;
 const fakeFace: FaceProvider = {
   name: 'fake-face',
-  compare: async () => {
+  compare: async (_id, selfie) => {
     faceCalls++;
+    lastSelfie = selfie;
     return faceImpl();
+  },
+};
+// Fake liveness provider: tests set `liveImpl` / `createImpl`.
+const goodLive = async (): Promise<LivenessResult> => ({ status: 'live', confidence: 97 });
+let liveImpl: () => Promise<LivenessResult> = goodLive;
+let liveCalls = 0;
+let sessionCounter = 0;
+let createImpl: () => Promise<{ providerSessionId: string }> = async () => ({ providerSessionId: `live-${++sessionCounter}` });
+const fakeLiveness: LivenessProvider = {
+  name: 'fake-live',
+  createSession: () => createImpl(),
+  getResult: async () => {
+    liveCalls++;
+    return liveImpl();
   },
 };
 const mrzText = (f: Partial<Td1Fields> = {}) => buildTd1({ ...SAMPLE, ...f }).join('\n');
@@ -96,11 +113,15 @@ describe('verification flow (e2e)', () => {
       .useValue(fakeOcr)
       .overrideProvider(FACE_PROVIDER)
       .useValue(fakeFace)
+      .overrideProvider(LIVENESS_PROVIDER)
+      .useValue(fakeLiveness)
       .compile();
     worker = moduleRef.get(VerificationWorker);
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
-    await app.init();
+    // Listen once: otherwise supertest starts and stops the server around each request, and
+    // concurrent requests (the race tests) can have it closed underneath them.
+    await app.listen(0);
   });
 
   afterAll(async () => {
@@ -168,7 +189,7 @@ describe('verification flow (e2e)', () => {
     await waitFor(() => hooks.length >= 1);
     const done = await request(http).get(`/v1/sessions/${id}`).set(auth()).expect(200);
     expect(done.body.status).toBe('NEEDS_REVIEW');
-    expect(done.body.verification.issues).toEqual(['ID_BACK_MISSING']);
+    expect(done.body.verification.issues).toEqual(['ID_BACK_MISSING', 'LIVENESS_NOT_PERFORMED']);
 
     // Webhook is sent after the response, so wait for it to arrive
 
@@ -182,7 +203,7 @@ describe('verification flow (e2e)', () => {
       sessionId: id,
       externalRef: 'user-42',
       status: 'NEEDS_REVIEW',
-      verification: { mrz: { found: false }, issues: ['ID_BACK_MISSING'] },
+      verification: { mrz: { found: false }, issues: ['ID_BACK_MISSING', 'LIVENESS_NOT_PERFORMED'] },
     });
   });
 
@@ -276,6 +297,7 @@ describe('verification flow (e2e)', () => {
       ref: string,
       identity: { firstName?: string; lastName?: string; birthDate?: string } | null = { firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' },
       withBack = true,
+      withLiveness = true,
     ) {
       const created = await request(http()).post('/v1/sessions').set(auth()).send({ externalRef: ref, ...identity }).expect(201);
       const token = created.body.uploadToken as string;
@@ -283,6 +305,7 @@ describe('verification flow (e2e)', () => {
       for (const kind of kinds) {
         await request(http()).post(`/v1/upload/${token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
       }
+      if (withLiveness) await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
       await request(http()).post(`/v1/upload/${token}/submit`).expect(200);
       return created.body.id as string;
     }
@@ -297,11 +320,15 @@ describe('verification flow (e2e)', () => {
     }
 
     const setAutoApprove = (autoApprove: boolean) => prisma.tenant.update({ where: { id: tenantId }, data: { autoApprove } });
+    const setLivenessMin = (livenessMinConfidence: number) => prisma.tenant.update({ where: { id: tenantId }, data: { livenessMinConfidence } });
     const setThreshold = (faceMatchThreshold: number) => prisma.tenant.update({ where: { id: tenantId }, data: { faceMatchThreshold } });
     afterEach(async () => {
       await setAutoApprove(false);
       await setThreshold(90);
       faceImpl = goodFace;
+      liveImpl = goodLive;
+      createImpl = async () => ({ providerSessionId: `live-${++sessionCounter}` });
+      await setLivenessMin(90);
       ocrImpl = async () => ({ text: '' });
     });
 
@@ -509,7 +536,7 @@ describe('verification flow (e2e)', () => {
         await setAutoApprove(true);
         const body = await settled(await submitted('face-ok'));
         expect(body.status).toBe('APPROVED');
-        expect(body.verification.face).toEqual({ status: 'match', similarity: 95, provider: 'fake-face' });
+        expect(body.verification.face).toEqual({ status: 'match', similarity: 95, provider: 'fake-face', source: 'selfie' });
       });
 
       it('applies the tenant threshold', async () => {
@@ -517,7 +544,7 @@ describe('verification flow (e2e)', () => {
         await setThreshold(99);
         const body = await settled(await submitted('face-strict'));
         expect(body.status).toBe('NEEDS_REVIEW');
-        expect(body.verification.face).toEqual({ status: 'below_threshold', similarity: 95, provider: 'fake-face' });
+        expect(body.verification.face).toEqual({ status: 'below_threshold', similarity: 95, provider: 'fake-face', source: 'selfie' });
         expect(body.verification.issues).toEqual(['FACE_BELOW_THRESHOLD']);
       });
 
@@ -543,7 +570,7 @@ describe('verification flow (e2e)', () => {
         };
         const body = await settled(await submitted('face-unavailable'));
         expect(body.status).toBe('NEEDS_REVIEW');
-        expect(body.verification.face).toEqual({ status: null, similarity: null, provider: null });
+        expect(body.verification.face).toEqual({ status: null, similarity: null, provider: null, source: null });
         expect(body.verification.issues).toEqual(['FACE_UNAVAILABLE']);
         expect(faceCalls - before).toBe(1);
         // A broken deployment must be visible in the logs, without any image or document data
@@ -573,6 +600,145 @@ describe('verification flow (e2e)', () => {
         await settled(id);
         const row = await prisma.verificationResult.findUnique({ where: { sessionId: id } });
         expect(row).toMatchObject({ faceStatus: 'match', faceSimilarity: 95, faceProvider: 'fake-face' });
+      });
+    });
+
+    describe('liveness', () => {
+      beforeEach(() => {
+        ocrImpl = async () => ({ text: mrzText() });
+      });
+
+      const startToken = async (ref: string) => {
+        const created = await request(http()).post('/v1/sessions').set(auth()).send({ externalRef: ref }).expect(201);
+        return { token: created.body.uploadToken as string, id: created.body.id as string };
+      };
+
+      it('starts a challenge, stores only the provider session id, and audit-logs it', async () => {
+        const { token, id } = await startToken('live-start');
+        const res = await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
+        expect(res.body).toMatchObject({ provider: 'fake-live', sessionId: expect.stringMatching(/^live-/) });
+        const row = await prisma.session.findUnique({ where: { id } });
+        expect(row?.livenessSessionId).toBe(res.body.sessionId);
+        expect((await prisma.auditLog.findMany({ where: { sessionId: id } })).map((l) => l.event)).toContain('liveness.started');
+      });
+
+      it('keeps each session’s challenge separate and rejects unknown tokens', async () => {
+        const a = await startToken('live-a');
+        const b = await startToken('live-b');
+        const ra = await request(http()).post(`/v1/upload/${a.token}/liveness`).expect(200);
+        const rb = await request(http()).post(`/v1/upload/${b.token}/liveness`).expect(200);
+        expect(ra.body.sessionId).not.toBe(rb.body.sessionId);
+        expect((await prisma.session.findUnique({ where: { id: a.id } }))?.livenessSessionId).toBe(ra.body.sessionId);
+        await request(http()).post('/v1/upload/not-a-token/liveness').expect(404);
+      });
+
+      it('answers 501 when no liveness provider is configured', async () => {
+        const { token, id } = await startToken('live-off');
+        createImpl = async () => {
+          throw new LivenessUnavailableError('off');
+        };
+        await request(http()).post(`/v1/upload/${token}/liveness`).expect(501);
+        expect((await prisma.session.findUnique({ where: { id } }))?.livenessSessionId).toBeNull();
+      });
+
+      it('cannot change the challenge after submit, even when racing it', async () => {
+        const { token, id } = await startToken('live-late');
+        await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
+        const first = (await prisma.session.findUnique({ where: { id } }))?.livenessSessionId;
+        for (const kind of ['ID_FRONT', 'SELFIE']) {
+          await request(http()).post(`/v1/upload/${token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+        }
+        const results = await Promise.all([
+          request(http()).post(`/v1/upload/${token}/submit`),
+          request(http()).post(`/v1/upload/${token}/liveness`),
+          request(http()).post(`/v1/upload/${token}/liveness`),
+        ]);
+        expect(results[0].status).toBe(200);
+        const stored = (await prisma.session.findUnique({ where: { id } }))?.livenessSessionId;
+        // Either the challenge was replaced before the submit claimed the session, or not at all
+        const replaced = results.slice(1).some((r) => r.status === 200);
+        expect(replaced ? stored !== first : stored === first).toBe(true);
+        await settled(id);
+        await request(http()).post(`/v1/upload/${token}/liveness`).expect(410);
+        expect((await prisma.session.findUnique({ where: { id } }))?.livenessSessionId).toBe(stored);
+      });
+
+      it('approves only with liveness, and reports it', async () => {
+        await setAutoApprove(true);
+        const body = await settled(await submitted('live-ok'));
+        expect(body.status).toBe('APPROVED');
+        expect(body.verification.liveness).toEqual({ status: 'live', confidence: 97, provider: 'fake-live' });
+      });
+
+      it('sends a session with no liveness challenge to review, even with auto-approve on', async () => {
+        await setAutoApprove(true);
+        const before = liveCalls;
+        const body = await settled(await submitted('live-skipped', undefined, true, false));
+        expect(body.status).toBe('NEEDS_REVIEW');
+        expect(body.verification.issues).toEqual(['LIVENESS_NOT_PERFORMED']);
+        expect(body.verification.liveness).toEqual({ status: null, confidence: null, provider: null });
+        expect(liveCalls - before).toBe(0);
+      });
+
+      it.each([
+        ['a failed challenge', { status: 'not_live', confidence: 8 } as LivenessResult, 'LIVENESS_FAILED'],
+        ['an unfinished challenge', { status: 'incomplete', confidence: null } as LivenessResult, 'LIVENESS_INCOMPLETE'],
+        ['a verdict below the tenant minimum', { status: 'live', confidence: 80 } as LivenessResult, 'LIVENESS_FAILED'],
+      ])('sends %s to review even with auto-approve on', async (_n, result, code) => {
+        await setAutoApprove(true);
+        liveImpl = async () => result;
+        const body = await settled(await submitted(`live-${code}`));
+        expect(body.status).toBe('NEEDS_REVIEW');
+        expect(body.verification.issues).toEqual([code]);
+      });
+
+      it('applies the tenant’s minimum confidence', async () => {
+        await setAutoApprove(true);
+        await setLivenessMin(99);
+        const body = await settled(await submitted('live-strict'));
+        expect(body.status).toBe('NEEDS_REVIEW');
+        expect(body.verification.liveness).toMatchObject({ status: 'not_live', confidence: 97 });
+      });
+
+      it('goes to review without retrying when the provider is unavailable', async () => {
+        await setAutoApprove(true);
+        const before = liveCalls;
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+        liveImpl = async () => {
+          throw new LivenessUnavailableError('credentials');
+        };
+        const body = await settled(await submitted('live-down'));
+        expect(body.status).toBe('NEEDS_REVIEW');
+        expect(body.verification.issues).toEqual(['LIVENESS_UNAVAILABLE']);
+        expect(liveCalls - before).toBe(1);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('Liveness unavailable'));
+        warn.mockRestore();
+      });
+
+      it('retries a transient liveness failure', async () => {
+        let n = 0;
+        liveImpl = async () => {
+          if (++n < 2) throw new Error('throttled');
+          return goodLive();
+        };
+        expect((await settled(await submitted('live-flaky'))).verification.liveness.status).toBe('live');
+        expect(n).toBe(2);
+      });
+
+      it('compares the liveness reference image, not the uploaded selfie', async () => {
+        const reference = Buffer.from('reference-from-liveness');
+        liveImpl = async () => ({ status: 'live', confidence: 97, referenceImage: reference });
+        const body = await settled(await submitted('live-ref'));
+        expect(lastSelfie).toEqual(reference);
+        expect(body.verification.face.source).toBe('liveness');
+        const row = await prisma.verificationResult.findFirst({ where: { session: { externalRef: 'live-ref' } } });
+        expect(JSON.stringify(row)).not.toContain('reference-from-liveness');
+      });
+
+      it('falls back to the uploaded selfie when the provider returns no image', async () => {
+        const body = await settled(await submitted('live-noref'));
+        expect(lastSelfie).not.toEqual(Buffer.from('reference-from-liveness'));
+        expect(body.verification.face.source).toBe('selfie');
       });
     });
 

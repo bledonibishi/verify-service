@@ -33,6 +33,8 @@ model Tenant {
   autoApprove   Boolean   @default(false) @map("auto_approve")
   // Minimum selfie-to-ID similarity (0-100) that counts as a face match
   faceMatchThreshold Float @default(90) @map("face_match_threshold")
+  // Minimum liveness confidence (0-100) that counts as a live person
+  livenessMinConfidence Float @default(90) @map("liveness_min_confidence")
   createdAt     DateTime  @default(now()) @map("created_at")
   sessions      Session[]
 
@@ -51,6 +53,8 @@ model Session {
   expectedFirstName String? @map("expected_first_name")
   expectedLastName  String? @map("expected_last_name")
   expectedBirthDate String? @map("expected_birth_date")
+  // Set when the user starts a liveness challenge; the result is read by the pipeline
+  livenessSessionId String? @map("liveness_session_id")
   expiresAt   DateTime      @map("expires_at")
   createdAt   DateTime      @default(now()) @map("created_at")
   updatedAt   DateTime      @updatedAt @map("updated_at")
@@ -137,6 +141,12 @@ model VerificationResult {
   faceStatus      String?  @map("face_status")
   faceSimilarity  Float?   @map("face_similarity")
   faceProvider    String?  @map("face_provider")
+  // liveness | selfie: which image the face comparison used
+  faceSource      String?  @map("face_source")
+  // live | not_live | incomplete; null when no liveness check ran
+  livenessStatus     String? @map("liveness_status")
+  livenessConfidence Float?  @map("liveness_confidence")
+  livenessProvider   String? @map("liveness_provider")
   createdAt       DateTime @default(now()) @map("created_at")
 
   @@map("verification_results")

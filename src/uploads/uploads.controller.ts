@@ -25,6 +25,12 @@ export class UploadsController {
     return this.uploads.submit(token);
   }
 
+  @Post('liveness')
+  @HttpCode(200)
+  startLiveness(@Param('token') token: string) {
+    return this.uploads.startLiveness(token);
+  }
+
   @Post(':kind')
   @HttpCode(204)
   @UseInterceptors(FileInterceptor('file', { limits: { fileSize: MAX_UPLOAD_BYTES, files: 1 } }))

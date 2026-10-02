@@ -7,10 +7,20 @@ export interface FaceOutcome {
   similarity: number | null;
 }
 
+/** Liveness result against the tenant's minimum confidence. */
+export interface LivenessOutcome {
+  status: 'live' | 'not_live' | 'incomplete';
+  confidence: number | null;
+}
+
 /** Pass/fail outcome of reading and checking the documents. Holds no values read from the card. */
 export interface CheckOutcome {
   /** Null when the face check did not run (see the FACE_* issue codes). */
   face: FaceOutcome | null;
+  /** Null when no liveness check ran (see the LIVENESS_* issue codes). */
+  liveness: LivenessOutcome | null;
+  /** Which image the face comparison used. */
+  faceSource: 'liveness' | 'selfie' | null;
   mrzFound: boolean;
   mrzValid: boolean;
   ocrRepaired: boolean;
@@ -24,7 +34,7 @@ export type Decision = 'APPROVED' | 'NEEDS_REVIEW';
 
 /** Outcome used when the ID back is absent or the pipeline gave up. */
 export function emptyOutcome(issueCode: string): CheckOutcome {
-  return { face: null, mrzFound: false, mrzValid: false, ocrRepaired: false, identity: null, expired: null, checks: [], issueCodes: [issueCode] };
+  return { face: null, liveness: null, faceSource: null, mrzFound: false, mrzValid: false, ocrRepaired: false, identity: null, expired: null, checks: [], issueCodes: [issueCode] };
 }
 
 const MISMATCH_CODE: Record<keyof IdentityComparison, string> = {
@@ -44,7 +54,7 @@ export function checkIdBack(ocrText: string, expected: ExpectedIdentity, now = n
   const checks = result.checks.map((c) => ({ field: c.field, ok: c.ok }));
 
   if (!result.ok || !result.data) {
-    return { face: null, mrzFound: true, mrzValid: false, ocrRepaired: false, identity: null, expired: null, checks, issueCodes: dedupe(issueCodes) };
+    return { face: null, liveness: null, faceSource: null, mrzFound: true, mrzValid: false, ocrRepaired: false, identity: null, expired: null, checks, issueCodes: dedupe(issueCodes) };
   }
 
   const identity = compareIdentity(result.data, expected);
@@ -56,6 +66,8 @@ export function checkIdBack(ocrText: string, expected: ExpectedIdentity, now = n
 
   return {
     face: null,
+    liveness: null,
+    faceSource: null,
     mrzFound: true,
     mrzValid: true,
     ocrRepaired: lenient.repaired,
@@ -83,12 +95,30 @@ export function withFace(outcome: CheckOutcome, face: FaceOutcome | null, missin
   return { ...outcome, face, issueCodes: dedupe([...outcome.issueCodes, ...codes]) };
 }
 
+const LIVENESS_CODE = { not_live: 'LIVENESS_FAILED', incomplete: 'LIVENESS_INCOMPLETE' } as const;
+
+/** Applies the tenant's minimum confidence: a "live" verdict below it counts as not live. */
+export function livenessOutcome(r: { status: 'live' | 'not_live' | 'incomplete'; confidence: number | null }, minConfidence: number): LivenessOutcome {
+  const live = r.status === 'live' && r.confidence !== null && r.confidence >= minConfidence;
+  return { status: live ? 'live' : r.status === 'live' ? 'not_live' : r.status, confidence: r.confidence };
+}
+
+/**
+ * Adds the liveness result. With no result, `performed: false` means the user never started a
+ * challenge (LIVENESS_NOT_PERFORMED); otherwise the provider was unavailable (LIVENESS_UNAVAILABLE).
+ */
+export function withLiveness(outcome: CheckOutcome, liveness: LivenessOutcome | null, performed = true): CheckOutcome {
+  const codes =
+    liveness === null ? [performed ? 'LIVENESS_UNAVAILABLE' : 'LIVENESS_NOT_PERFORMED'] : liveness.status === 'live' ? [] : [LIVENESS_CODE[liveness.status]];
+  return { ...outcome, liveness, issueCodes: dedupe([...outcome.issueCodes, ...codes]) };
+}
+
 const dedupe = (codes: string[]) => [...new Set(codes)];
 
 const isMatch = (m: FieldMatch | undefined) => m === 'match';
 
 /**
- * Auto-approval needs the face match as well as the document checks.
+ * Auto-approval needs a face match and a passed liveness check as well as the document checks.
  * Conservative by design: the only automatic outcome is approval, and only when the tenant opted
  * in and every check passed with no issue of any severity (an OCR repair counts as an issue).
  * Nothing is ever rejected automatically; everything else goes to a human.
@@ -100,6 +130,7 @@ export function decide(outcome: CheckOutcome, autoApprove: boolean): Decision {
     outcome.issueCodes.length === 0 &&
     outcome.expired === false &&
     outcome.face?.status === 'match' &&
+    outcome.liveness?.status === 'live' &&
     outcome.checks.length > 0 &&
     outcome.checks.every((c) => c.ok) &&
     isMatch(outcome.identity?.surname) &&
