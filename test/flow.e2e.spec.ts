@@ -15,6 +15,8 @@ import { buildTd1, SAMPLE, Td1Fields } from '../src/documents/mrz/testing';
 import { OCR_PROVIDER, OcrProvider, OcrUnavailableError } from '../src/ocr/ocr-provider';
 import { FACE_PROVIDER, FaceComparison, FaceProvider, FaceUnavailableError } from '../src/face/face-provider';
 import { LIVENESS_PROVIDER, LivenessProvider, LivenessResult, LivenessUnavailableError } from '../src/liveness/liveness-provider';
+import { RetentionService } from '../src/retention/retention.service';
+import { StorageService } from '../src/storage/storage.service';
 import { hashPassword } from '../src/review/password';
 import { VerificationWorker } from '../src/verification/verification.worker';
 
@@ -64,6 +66,7 @@ process.env.PUBLIC_BASE_URL = 'http://verify.test';
 process.env.VERIFICATION_RETRY_BASE_MS = '10';
 process.env.THROTTLE_LIMIT = '100000';
 process.env.LOGIN_RATE_LIMIT = '100000';
+process.env.RETENTION_JOB_ENABLED = 'false';
 process.env.VERIFICATION_POLL_MS = '50';
 
 async function waitFor(cond: () => boolean, ms = 3000) {
@@ -85,6 +88,7 @@ describe('verification flow (e2e)', () => {
   const webhookSecret = `whsec_${randomToken()}`;
   let tenantId: string;
   let worker: VerificationWorker;
+  let retention: RetentionService;
 
   beforeAll(async () => {
     hookServer = createServer((req, res) => {
@@ -119,6 +123,7 @@ describe('verification flow (e2e)', () => {
       .useValue(fakeLiveness)
       .compile();
     worker = moduleRef.get(VerificationWorker);
+    retention = moduleRef.get(RetentionService);
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     // Listen once: otherwise supertest starts and stops the server around each request, and
@@ -1126,6 +1131,313 @@ describe('verification flow (e2e)', () => {
         expect(codes).toContain(429);
       } finally {
         process.env.LOGIN_RATE_LIMIT = normal;
+      }
+    });
+  });
+
+  describe('retention, deletion and evidence', () => {
+    const http = () => app.getHttpServer();
+    const suffix = randomToken(6).toLowerCase().replace(/[^a-z0-9]/g, 'x');
+    const DAY = 86_400_000;
+    const days = (n: number) => new Date(Date.now() - n * DAY);
+    type T = { id: string; key: string; h: { Authorization: string } };
+    let t1: T; // defaults: documents 30 days, records 1825 days, no evidence export
+    let t2: T; // documents kept 90 days
+    let t3: T; // evidence export on
+    let tZero: T; // documents deleted immediately after the decision
+
+    async function mkTenant(name: string, extra: object = {}): Promise<T> {
+      const key = `vk_${name}_${suffix}`;
+      const main = await prisma.tenant.findUniqueOrThrow({ where: { id: tenantId } });
+      const t = await prisma.tenant.create({
+        data: { name: `ret-${name}`, apiKeyHash: sha256(key), webhookUrl: main.webhookUrl, webhookSecret: `whsec_${name}_${suffix}`, ...extra },
+      });
+      return { id: t.id, key, h: { Authorization: `Bearer ${key}` } };
+    }
+
+    /** A session with three real uploads, optionally already decided `decidedDaysAgo` days ago. */
+    async function withDocs(t: T, ref: string, decidedDaysAgo: number | null, status: 'APPROVED' | 'REJECTED' | 'NEEDS_REVIEW' | 'PENDING' = 'APPROVED') {
+      const created = await request(http()).post('/v1/sessions').set(t.h).send({ externalRef: ref, firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' }).expect(201);
+      const token = created.body.uploadToken as string;
+      for (const kind of ['ID_FRONT', 'ID_BACK', 'SELFIE']) {
+        await request(http()).post(`/v1/upload/${token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+      }
+      const id = created.body.id as string;
+      if (status !== 'PENDING') {
+        await prisma.session.update({
+          where: { id },
+          data: { status, ...(decidedDaysAgo !== null ? { decidedAt: days(decidedDaysAgo) } : {}) },
+        });
+      }
+      return { id, token };
+    }
+    const dir = (t: T, id: string) => join(storageDir, t.id, id);
+    const files = (t: T, id: string) => {
+      try {
+        return readdirSync(dir(t, id));
+      } catch {
+        return [];
+      }
+    };
+    const exists = async (id: string) => (await prisma.session.count({ where: { id } })) === 1;
+
+    beforeAll(async () => {
+      t1 = await mkTenant('t1');
+      t2 = await mkTenant('t2', { documentRetentionDays: 90 });
+      t3 = await mkTenant('t3', { evidenceExport: true });
+      tZero = await mkTenant('tzero', { documentRetentionDays: 0 });
+    });
+    afterAll(async () => {
+      jest.restoreAllMocks();
+    });
+
+    it('deletes documents after the tenant’s window but keeps the record', async () => {
+      const due = await withDocs(t1, 'due', 31);
+      const fresh = await withDocs(t1, 'fresh', 29);
+      expect(files(t1, due.id)).toHaveLength(3);
+      await retention.run();
+
+      expect(files(t1, due.id)).toHaveLength(0);
+      expect(await prisma.document.count({ where: { sessionId: due.id } })).toBe(0);
+      const row = await prisma.session.findUnique({ where: { id: due.id } });
+      expect(row?.documentsDeletedAt).not.toBeNull();
+      expect(row?.documentsManifest).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'SELFIE', sizeBytes: PNG.length, sha256: sha256(PNG) })]));
+      expect(row?.status).toBe('APPROVED'); // the decision and record survive
+      const log = await prisma.auditLog.findFirst({ where: { sessionId: due.id, event: 'retention.documents_deleted' } });
+      expect(log?.detail).toMatchObject({ count: 3 });
+      const api = await request(http()).get(`/v1/sessions/${due.id}`).set(t1.h).expect(200);
+      expect(api.body).toMatchObject({ status: 'APPROVED', uploaded: [] });
+      expect(api.body.documentsDeletedAt).not.toBeNull();
+
+      expect(files(t1, fresh.id)).toHaveLength(3); // not due yet
+    });
+
+    it('uses each tenant’s own window', async () => {
+      const a = await withDocs(t1, 'win-30', 45); // 30-day tenant: due
+      const b = await withDocs(t2, 'win-90', 45); // 90-day tenant: not due
+      const c = await withDocs(tZero, 'win-0', 0); // immediate
+      await retention.run();
+      expect(files(t1, a.id)).toHaveLength(0);
+      expect(files(t2, b.id)).toHaveLength(3);
+      expect(files(tZero, c.id)).toHaveLength(0);
+      // Changing the window applies to existing sessions at the next run
+      await prisma.tenant.update({ where: { id: t2.id }, data: { documentRetentionDays: 40 } });
+      await retention.run();
+      expect(files(t2, b.id)).toHaveLength(0);
+    });
+
+    it('never touches a session that has no decision yet, however old', async () => {
+      const waiting = await withDocs(t1, 'waiting', null, 'NEEDS_REVIEW');
+      await prisma.session.update({ where: { id: waiting.id }, data: { createdAt: days(400) } });
+      await retention.run();
+      expect(files(t1, waiting.id)).toHaveLength(3);
+      expect(await exists(waiting.id)).toBe(true);
+    });
+
+    it('deletes the whole record after the record window and leaves a tombstone without personal data', async () => {
+      const old = await withDocs(t1, 'old-record', 1900);
+      await prisma.verificationResult.create({
+        data: { sessionId: old.id, decision: 'APPROVED', autoDecided: false, mrzFound: true, mrzValid: true, ocrRepaired: false, checks: [], issueCodes: [], ocrProvider: 'x' },
+      });
+      await retention.run();
+      expect(await exists(old.id)).toBe(false);
+      expect(files(t1, old.id)).toHaveLength(0);
+      expect(await prisma.verificationResult.count({ where: { sessionId: old.id } })).toBe(0);
+      expect(await prisma.auditLog.count({ where: { sessionId: old.id } })).toBe(0);
+      const tomb = await prisma.deletionRecord.findFirst({ where: { sessionId: old.id } });
+      expect(tomb).toMatchObject({ tenantId: t1.id, reason: 'retention', documentCount: 3 });
+      expect(JSON.stringify(tomb)).not.toMatch(/old-record|Dema|Testi/); // not even the tenant's own reference
+      await request(http()).get(`/v1/sessions/${old.id}`).set(t1.h).expect(404);
+    });
+
+    it('removes abandoned sessions after the grace period, and nothing else', async () => {
+      const gone = await withDocs(t1, 'abandoned', null, 'PENDING');
+      const recent = await withDocs(t1, 'recently-expired', null, 'PENDING');
+      const live = await withDocs(t1, 'still-open', null, 'PENDING');
+      await prisma.session.update({ where: { id: gone.id }, data: { expiresAt: new Date(Date.now() - 25 * 3600_000) } });
+      await prisma.session.update({ where: { id: recent.id }, data: { expiresAt: new Date(Date.now() - 3600_000) } });
+      await retention.run();
+      expect(await exists(gone.id)).toBe(false);
+      expect(files(t1, gone.id)).toHaveLength(0);
+      expect(await prisma.deletionRecord.count({ where: { sessionId: gone.id, reason: 'abandoned' } })).toBe(1);
+      expect(await exists(recent.id)).toBe(true);
+      expect(await exists(live.id)).toBe(true);
+    });
+
+    it('is safe to run on several instances at once', async () => {
+      const ids = [];
+      for (let i = 0; i < 4; i++) ids.push((await withDocs(t1, `par-${i}`, 31)).id);
+      const reports = await Promise.all([retention.run(), retention.run(), retention.run()]);
+      expect(reports.reduce((n, r) => n + r.failed, 0)).toBe(0);
+      expect(reports.reduce((n, r) => n + r.documentsDeleted, 0)).toBeGreaterThanOrEqual(4);
+      for (const id of ids) {
+        expect(await prisma.auditLog.count({ where: { sessionId: id, event: 'retention.documents_deleted' } })).toBe(1);
+      }
+    });
+
+    it('keeps the rows when a file cannot be deleted, and finishes on the next run', async () => {
+      const a = await withDocs(t1, 'fail-a', 31);
+      const b = await withDocs(t1, 'fail-b', 31);
+      // Only this test's session fails (the run is global, so other leftovers must not matter)
+      const real = StorageService.prototype.delete;
+      const spy = jest.spyOn(StorageService.prototype, 'delete').mockImplementation(function (this: StorageService, key: string) {
+        return key.includes(a.id) ? Promise.reject(new Error('disk offline')) : real.call(this, key);
+      });
+      const first = await retention.run();
+      spy.mockRestore();
+      expect(first.failed).toBeGreaterThanOrEqual(1);
+      // The other session was processed; the failed one still has its rows, files and no deletion stamp
+      expect(files(t1, b.id)).toHaveLength(0);
+      expect(files(t1, a.id)).toHaveLength(3);
+      expect(await prisma.document.count({ where: { sessionId: a.id } })).toBe(3);
+      expect((await prisma.session.findUnique({ where: { id: a.id } }))?.documentsDeletedAt).toBeNull();
+      const second = await retention.run();
+      expect(second.failed).toBe(0);
+      expect(files(t1, a.id)).toHaveLength(0);
+      expect(await prisma.document.count({ where: { sessionId: a.id } })).toBe(0);
+    });
+
+    describe('DELETE /v1/sessions/:id', () => {
+      it('erases a session on request, leaves a tombstone, and 404s afterwards', async () => {
+        const s = await withDocs(t1, 'erase-me', 3);
+        await request(http()).delete(`/v1/sessions/${s.id}`).set(t1.h).expect(204);
+        expect(await exists(s.id)).toBe(false);
+        expect(files(t1, s.id)).toHaveLength(0);
+        expect(await prisma.deletionRecord.findFirst({ where: { sessionId: s.id } })).toMatchObject({ reason: 'tenant_request', documentCount: 3 });
+        await request(http()).get(`/v1/sessions/${s.id}`).set(t1.h).expect(404);
+        await request(http()).delete(`/v1/sessions/${s.id}`).set(t1.h).expect(404);
+        // The upload link died with the session
+        await request(http()).post(`/v1/upload/${s.token}/SELFIE`).attach('file', PNG, { filename: 'x.png' }).expect(404);
+      });
+
+      it('works for sessions in any state except while the pipeline is reading them', async () => {
+        for (const status of ['NEEDS_REVIEW', 'REJECTED'] as const) {
+          const s = await withDocs(t1, `erase-${status}`, null, status);
+          await request(http()).delete(`/v1/sessions/${s.id}`).set(t1.h).expect(204);
+        }
+        const open = await withDocs(t1, 'erase-pending', null, 'PENDING');
+        await request(http()).delete(`/v1/sessions/${open.id}`).set(t1.h).expect(204);
+        const busy = await withDocs(t1, 'erase-busy', null, 'PENDING');
+        await prisma.session.update({ where: { id: busy.id }, data: { status: 'PROCESSING' } });
+        await request(http()).delete(`/v1/sessions/${busy.id}`).set(t1.h).expect(409);
+        expect(await exists(busy.id)).toBe(true);
+        expect(files(t1, busy.id)).toHaveLength(3);
+      });
+
+      it('cannot reach another tenant’s session, and needs an API key', async () => {
+        const s = await withDocs(t1, 'not-yours', 3);
+        await request(http()).delete(`/v1/sessions/${s.id}`).set(t2.h).expect(404);
+        await request(http()).delete(`/v1/sessions/${s.id}`).expect(401);
+        await request(http()).delete('/v1/sessions/not-a-uuid').set(t1.h).expect(400);
+        expect(await exists(s.id)).toBe(true);
+        expect(files(t1, s.id)).toHaveLength(3);
+        expect(await prisma.deletionRecord.count({ where: { sessionId: s.id } })).toBe(0);
+      });
+
+      it('leaves no file behind when an upload races the deletion', async () => {
+        for (let i = 0; i < 6; i++) {
+          const created = await request(http()).post('/v1/sessions').set(t1.h).send({ externalRef: `race-del-${i}` }).expect(201);
+          const token = created.body.uploadToken as string;
+          const id = created.body.id as string;
+          await request(http()).post(`/v1/upload/${token}/ID_FRONT`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+          const [del, up] = await Promise.all([
+            request(http()).delete(`/v1/sessions/${id}`).set(t1.h),
+            request(http()).post(`/v1/upload/${token}/SELFIE`).attach('file', PNG, { filename: 'a.png' }),
+          ]);
+          expect(del.status).toBe(204);
+          expect([204, 404, 410]).toContain(up.status);
+          expect(await exists(id)).toBe(false);
+          expect(files(t1, id)).toHaveLength(0);
+        }
+      });
+    });
+
+    describe('evidence export', () => {
+      it('is refused unless the tenant has it enabled', async () => {
+        const s = await withDocs(t1, 'ev-off', 3);
+        await request(http()).get(`/v1/sessions/${s.id}/evidence`).set(t1.h).expect(403);
+        await request(http()).get(`/v1/sessions/${s.id}/evidence/documents/SELFIE`).set(t1.h).expect(403);
+        await request(http()).get(`/v1/sessions/${s.id}/evidence`).expect(401);
+        expect(await prisma.auditLog.count({ where: { sessionId: s.id, event: { startsWith: 'evidence.' } } })).toBe(0);
+      });
+
+      it('returns a signed bundle with integrity hashes and an audit trail', async () => {
+        const s = await withDocs(t3, 'ev-on', 3);
+        const reviewer = await prisma.reviewer.create({ data: { tenantId: t3.id, email: `ev-${suffix}@example.test`, passwordHash: 'x' } });
+        await prisma.session.update({ where: { id: s.id }, data: { reviewedById: reviewer.id, reviewReason: 'looks right', reviewedAt: days(3) } });
+        const res = await request(http()).get(`/v1/sessions/${s.id}/evidence`).set(t3.h).expect(200);
+        const sig = String(res.headers['x-evidence-signature']).match(/^t=(\d+),v1=([0-9a-f]+)$/)!;
+        expect(sig[2]).toBe(hmacSign(`whsec_t3_${suffix}`, `${sig[1]}.${res.text}`));
+        expect(res.body).toMatchObject({
+          version: 1,
+          session: { id: s.id, status: 'APPROVED', externalRef: 'ev-on' },
+          expectedIdentity: { firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' },
+          review: { decision: 'APPROVED', reason: 'looks right', reviewer: `ev-${suffix}@example.test` },
+          documentsDeletedAt: null,
+        });
+        expect(res.body.documents).toHaveLength(3);
+        expect(res.body.documents[0]).toMatchObject({ sizeBytes: PNG.length, sha256: sha256(PNG) });
+        expect(res.body.auditLog.map((l: { event: string }) => l.event)).toContain('document.uploaded');
+        expect(await prisma.auditLog.count({ where: { sessionId: s.id, event: 'evidence.exported' } })).toBe(1);
+      });
+
+      it('serves a decrypted document that matches its recorded hash, and audit-logs it', async () => {
+        const s = await withDocs(t3, 'ev-doc', 3);
+        const res = await request(http()).get(`/v1/sessions/${s.id}/evidence/documents/ID_FRONT`).set(t3.h).buffer(true).parse((r, cb) => {
+          const chunks: Buffer[] = [];
+          r.on('data', (c: Buffer) => chunks.push(c));
+          r.on('end', () => cb(null, Buffer.concat(chunks)));
+        }).expect(200);
+        expect(Buffer.compare(res.body as Buffer, PNG)).toBe(0);
+        expect(res.headers['x-document-sha256']).toBe(sha256(PNG));
+        expect(res.headers['cache-control']).toBe('no-store');
+        expect((await prisma.auditLog.findFirst({ where: { sessionId: s.id, event: 'evidence.document_exported' } }))?.detail).toEqual({ kind: 'ID_FRONT' });
+        await request(http()).get(`/v1/sessions/${s.id}/evidence/documents/NOPE`).set(t3.h).expect(400);
+      });
+
+      it('is scoped to the owning tenant', async () => {
+        const s = await withDocs(t3, 'ev-iso', 3);
+        const other = await mkTenant('t3b', { evidenceExport: true });
+        await request(http()).get(`/v1/sessions/${s.id}/evidence`).set(other.h).expect(404);
+        await request(http()).get(`/v1/sessions/${s.id}/evidence/documents/SELFIE`).set(other.h).expect(404);
+        expect(await prisma.auditLog.count({ where: { sessionId: s.id, event: { startsWith: 'evidence.' } } })).toBe(0);
+      });
+
+      it('still describes the documents after retention deleted them', async () => {
+        const s = await withDocs(t3, 'ev-after', 31);
+        await retention.run();
+        expect(files(t3, s.id)).toHaveLength(0);
+        const res = await request(http()).get(`/v1/sessions/${s.id}/evidence`).set(t3.h).expect(200);
+        expect(res.body.documentsDeletedAt).not.toBeNull();
+        expect(res.body.documents).toHaveLength(3);
+        expect(res.body.documents[0].sha256).toBe(sha256(PNG));
+        expect(res.body.auditLog.map((l: { event: string }) => l.event)).toContain('retention.documents_deleted');
+        await request(http()).get(`/v1/sessions/${s.id}/evidence/documents/SELFIE`).set(t3.h).expect(410);
+      });
+    });
+
+    it('stamps decidedAt on pipeline approvals and human decisions, so the retention clock starts', async () => {
+      ocrImpl = async () => ({ text: mrzText() });
+      await prisma.tenant.update({ where: { id: t1.id }, data: { autoApprove: true } });
+      try {
+        const created = await request(http()).post('/v1/sessions').set(t1.h).send({ externalRef: 'clock', firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' }).expect(201);
+        const token = created.body.uploadToken as string;
+        for (const kind of ['ID_FRONT', 'ID_BACK', 'SELFIE']) {
+          await request(http()).post(`/v1/upload/${token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+        }
+        await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
+        await request(http()).post(`/v1/upload/${token}/submit`).expect(200);
+        for (let i = 0; i < 200; i++) {
+          const row = await prisma.session.findUnique({ where: { id: created.body.id } });
+          if (row && row.status !== 'PROCESSING') break;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+        const row = await prisma.session.findUnique({ where: { id: created.body.id } });
+        expect(row?.status).toBe('APPROVED');
+        expect(row?.decidedAt).not.toBeNull();
+      } finally {
+        await prisma.tenant.update({ where: { id: t1.id }, data: { autoApprove: false } });
+        ocrImpl = async () => ({ text: '' });
       }
     });
   });

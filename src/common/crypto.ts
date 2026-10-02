@@ -7,7 +7,7 @@ import {
   timingSafeEqual,
 } from 'crypto';
 
-export function sha256(value: string): string {
+export function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
 }
 

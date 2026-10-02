@@ -38,6 +38,13 @@ model Tenant {
   createdAt     DateTime  @default(now()) @map("created_at")
   sessions      Session[]
   reviewers     Reviewer[]
+  // Documents (images) are deleted this many days after the final decision. 0 = right away.
+  documentRetentionDays Int @default(30) @map("document_retention_days")
+  // The whole session record (results, audit log, expected identity) is deleted this many days
+  // after the decision. The default matches the 5-year minimum some regulated customers need.
+  recordRetentionDays   Int @default(1825) @map("record_retention_days")
+  // Regulated tenants may export evidence (including the decrypted documents) through the API
+  evidenceExport        Boolean @default(false) @map("evidence_export")
 
   @@map("tenants")
 }
@@ -68,6 +75,11 @@ model Session {
   reviewedBy     Reviewer? @relation(fields: [reviewedById], references: [id], onDelete: SetNull)
   reviewReason   String?   @map("review_reason")
   reviewedAt     DateTime? @map("reviewed_at")
+  // When the session reached APPROVED or REJECTED; retention clocks start here
+  decidedAt      DateTime? @map("decided_at")
+  documentsDeletedAt DateTime? @map("documents_deleted_at")
+  // What the deleted documents were: [{ kind, contentType, sizeBytes, sha256 }]
+  documentsManifest  Json? @map("documents_manifest")
 
   @@index([tenantId, externalRef])
   @@index([tenantId, status, createdAt])
@@ -82,6 +94,8 @@ model Document {
   storageKey  String       @map("storage_key")
   contentType String       @map("content_type")
   sizeBytes   Int          @map("size_bytes")
+  // SHA-256 of the stored image bytes, for evidence integrity (null on older rows)
+  sha256      String?
   createdAt   DateTime     @default(now()) @map("created_at")
 
   @@unique([sessionId, kind])
@@ -191,4 +205,19 @@ model ReviewerSession {
 
   @@index([reviewerId])
   @@map("reviewer_sessions")
+}
+
+// Proof that a session was erased. Deliberately holds no personal data: not even the tenant's
+// own reference for the person, only the session id the tenant already has.
+model DeletionRecord {
+  id            String   @id @default(uuid())
+  tenantId      String   @map("tenant_id")
+  sessionId     String   @map("session_id")
+  // retention | abandoned | tenant_request
+  reason        String
+  documentCount Int      @map("document_count")
+  deletedAt     DateTime @default(now()) @map("deleted_at")
+
+  @@index([tenantId, deletedAt])
+  @@map("deletion_records")
 }

@@ -76,6 +76,7 @@ export class UploadsService {
     const contentType = detectImageType(data);
     if (!contentType) throw new BadRequestException('File must be a JPEG, PNG or WebP image');
 
+    const digest = sha256(data);
     const storageKey = `${session.tenantId}/${session.id}/${randomUUID()}`;
     await this.storage.put(storageKey, data);
 
@@ -96,8 +97,8 @@ export class UploadsService {
         displacedKey = existing?.storageKey;
         await tx.document.upsert({
           where: { sessionId_kind: { sessionId: session.id, kind } },
-          create: { sessionId: session.id, kind, storageKey, contentType, sizeBytes: data.length },
-          update: { storageKey, contentType, sizeBytes: data.length },
+          create: { sessionId: session.id, kind, storageKey, contentType, sizeBytes: data.length, sha256: digest },
+          update: { storageKey, contentType, sizeBytes: data.length, sha256: digest },
         });
         await tx.auditLog.create({
           data: { sessionId: session.id, event: 'document.uploaded', detail: { kind } },

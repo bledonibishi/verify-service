@@ -84,7 +84,7 @@ export class ReviewService {
     const outcome = await this.prisma.$transaction(async (tx) => {
       const moved = await tx.session.updateMany({
         where: { id, tenantId: reviewer.tenantId, status: SessionStatus.NEEDS_REVIEW },
-        data: { status: decision, reviewedById: reviewer.id, reviewReason: reason ?? null, reviewedAt: new Date() },
+        data: { status: decision, reviewedById: reviewer.id, reviewReason: reason ?? null, reviewedAt: new Date(), decidedAt: new Date() },
       });
       if (moved.count === 0) return null;
       await tx.auditLog.create({
