@@ -10,7 +10,8 @@ Step 1 of the roadmap is in place: tenants, sessions, encrypted uploads, signed 
 
 - [x] Tenants + API keys, sessions, uploads, encrypted storage, signed webhooks
 - [x] Kosovo MRZ module: TD1 parser, check digits, OCR repair, name/DOB cross-check (`src/documents/mrz`, see [docs/kosovo-documents.md](docs/kosovo-documents.md))
-- [ ] Wire MRZ checks into the submit pipeline; driving licence field extraction
+- [x] Verification pipeline: background worker reads the ID back MRZ (Tesseract), checks it against the expected identity and expiry, stores flags and issue codes
+- [ ] Driving licence field extraction
 - [ ] Admin review queue / UI (individual reviewer accounts)
 - [ ] Face match + liveness (pluggable providers)
 - [ ] Per-tenant retention, evidence export, NFC chip SDK, billing
@@ -36,20 +37,43 @@ pnpm start:dev                          # http://localhost:4100
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/v1/sessions` | Start a verification. Body: `externalRef` (your user id), optional `firstName`, `lastName`, `birthDate` (`YYYY-MM-DD`). Returns `id`, `uploadToken`, `uploadUrl`, `expiresAt`. |
-| `GET` | `/v1/sessions/:id` | Current `status` and which documents are uploaded. |
+| `GET` | `/v1/sessions/:id` | Current `status`, which documents are uploaded, and `verification` (null until the automated checks have run). |
 
 **End-user** (authorised only by the one-time token in the URL)
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/v1/upload/:token/:kind` | Multipart field `file` (JPEG/PNG/WebP, max 8 MB). `kind` is `ID_FRONT`, `ID_BACK` or `SELFIE`. Re-uploading replaces the earlier file. |
-| `POST` | `/v1/upload/:token/submit` | Finish. Requires `ID_FRONT` and `SELFIE`. |
+| `POST` | `/v1/upload/:token/submit` | Finish. Requires `ID_FRONT` and `SELFIE`; `ID_BACK` is needed for the MRZ checks. Returns `PROCESSING` immediately. |
 
 Statuses: `PENDING`, `PROCESSING`, `NEEDS_REVIEW`, `APPROVED`, `REJECTED`, `EXPIRED`.
 
+### Verification pipeline
+
+Submitting queues a job (Postgres-backed, `FOR UPDATE SKIP LOCKED`, lease + retries with backoff). The worker decrypts `ID_BACK` in memory, runs OCR through the `OcrProvider` interface (`src/ocr`; Tesseract CLI today, image sent on stdin so nothing is written in the clear), finds the MRZ, validates check digits and expiry, and compares name and date of birth with what the tenant supplied when creating the session.
+
+Decisions are conservative:
+
+- The only automatic outcome is `APPROVED`, and only if the tenant has **auto-approve** on (default off; `pnpm tenant:create "name" [webhookUrl] --auto-approve`) *and* every check passed with no issue at all: MRZ found, all check digits valid, no OCR repair, surname, given names and date of birth all matching, not expired. Supplying no expected identity, or any mismatch, never auto-approves.
+- Nothing is rejected automatically. Everything else, including unreadable images, missing `ID_BACK`, a missing OCR engine and repeated pipeline failures, goes to `NEEDS_REVIEW`.
+- Face match is not implemented yet, so with auto-approve on, "approved" currently means "the ID document checks passed", not "the selfie matches". Leave it off until face matching ships.
+
+`verification` (in `GET /v1/sessions/:id` and the webhook) holds flags and issue codes only, never names, dates or numbers read from the card:
+
+```json
+{ "decision": "NEEDS_REVIEW", "autoDecided": false,
+  "mrz": { "found": true, "valid": true, "repaired": false },
+  "identity": { "surname": "match", "givenNames": "match", "birthDate": "mismatch" },
+  "expired": false, "checks": [{ "field": "documentNumber", "ok": true }], "issues": ["BIRTH_DATE_MISMATCH"] }
+```
+
+Issue codes are the MRZ parser's (`CHECK_DIGIT_MISMATCH`, `OPTIONAL_DATA_PRESENT`, `OCR_REPAIRED`, ...) plus `ID_BACK_MISSING`, `MRZ_NOT_FOUND`, `SURNAME_MISMATCH`, `GIVEN_NAMES_MISMATCH`, `BIRTH_DATE_MISMATCH`, `EXPECTED_IDENTITY_MISSING`, `DOCUMENT_EXPIRED`, `OCR_UNAVAILABLE`, `PIPELINE_ERROR`.
+
+OCR needs the `tesseract` binary on the host (`brew install tesseract` / `apt install tesseract-ocr`). Accuracy on real cards has not been tuned yet; see the PR notes.
+
 ### Webhooks
 
-`POST` to the tenant's webhook URL with JSON `{ type, sessionId, externalRef, status, occurredAt }`.
+`POST` to the tenant's webhook URL with JSON `{ type, sessionId, externalRef, status, occurredAt, verification }`. It is sent once the pipeline has decided (not at submit).
 
 Header `X-Verify-Signature: t=<unix>,v1=<hex>` where `v1 = HMAC-SHA256(webhookSecret, "<t>.<raw body>")`. Verify the signature and reject old timestamps.
 
