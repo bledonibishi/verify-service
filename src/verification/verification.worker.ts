@@ -6,7 +6,8 @@ import { StorageService } from '../storage/storage.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
 import { OCR_PROVIDER, OcrError, OcrProvider, OcrUnavailableError } from '../ocr/ocr-provider';
 import { FACE_PROVIDER, FaceProvider, FaceUnavailableError } from '../face/face-provider';
-import { CheckOutcome, FaceOutcome, checkIdBack, decide, emptyOutcome, faceOutcome, withFace } from './decision';
+import { LIVENESS_PROVIDER, LivenessProvider, LivenessUnavailableError } from '../liveness/liveness-provider';
+import { CheckOutcome, LivenessOutcome, bindFaceToLiveness, livenessOutcome, withLiveness, FaceOutcome, checkIdBack, decide, emptyOutcome, faceOutcome, withFace } from './decision';
 import { toSummary } from './summary';
 
 const MAX_ATTEMPTS = 3;
@@ -39,6 +40,7 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     private readonly config: ConfigService,
     @Inject(OCR_PROVIDER) private readonly ocr: OcrProvider,
     @Inject(FACE_PROVIDER) private readonly face: FaceProvider,
+    @Inject(LIVENESS_PROVIDER) private readonly liveness: LivenessProvider,
   ) {
     this.enabled = config.get('VERIFICATION_WORKER_ENABLED') !== 'false';
     this.concurrency = Math.max(1, this.int('VERIFICATION_CONCURRENCY', 2));
@@ -96,7 +98,7 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     try {
       if (job.attempts > MAX_ATTEMPTS) {
         // The worker died repeatedly while holding this job: stop retrying.
-        await this.finish(job, emptyOutcome('PIPELINE_ERROR'), { ocr: 'none', face: null });
+        await this.finish(job, emptyOutcome('PIPELINE_ERROR'), { ocr: 'none', face: null, liveness: null });
       } else {
         const outcome = await this.run(job);
         if (outcome) await this.finish(job, outcome.outcome, outcome.providers);
@@ -125,7 +127,7 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
   }
 
   /** Runs the document and face checks. Returns null when the session is no longer ours to decide. */
-  private async run(job: ClaimedJob): Promise<{ outcome: CheckOutcome; providers: { ocr: string; face: string | null } } | null> {
+  private async run(job: ClaimedJob): Promise<{ outcome: CheckOutcome; providers: { ocr: string; face: string | null; liveness: string | null } } | null> {
     const session = await this.prisma.session.findUnique({
       where: { id: job.session_id },
       include: { documents: true, tenant: true },
@@ -158,8 +160,33 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
       }
     }
 
-    const { face, missing } = await this.checkFace(job, session.documents, session.tenant.faceMatchThreshold);
-    return { outcome: withFace(mrz, face, missing), providers: { ocr: ocrName, face: face ? this.face.name : null } };
+    const live = await this.checkLiveness(job, session.livenessSessionId, session.tenant.livenessMinConfidence);
+    const { face, missing, source } = await this.checkFace(job, session.documents, session.tenant.faceMatchThreshold, live.referenceImage);
+    const outcome = bindFaceToLiveness({
+      ...withFace(withLiveness(mrz, live.outcome, live.performed), face, missing),
+      faceSource: face ? source : null,
+    });
+    return {
+      outcome,
+      providers: { ocr: ocrName, face: face ? this.face.name : null, liveness: live.outcome ? this.liveness.name : null },
+    };
+  }
+
+  /** Reads the liveness verdict. The reference image, if any, stays in memory for the face match. */
+  private async checkLiveness(
+    job: ClaimedJob,
+    providerSessionId: string | null,
+    minConfidence: number,
+  ): Promise<{ outcome: LivenessOutcome | null; performed: boolean; referenceImage?: Buffer }> {
+    if (!providerSessionId) return { outcome: null, performed: false };
+    try {
+      const r = await this.liveness.getResult(providerSessionId);
+      return { outcome: livenessOutcome(r, minConfidence), performed: true, referenceImage: r.referenceImage };
+    } catch (err) {
+      if (!(err instanceof LivenessUnavailableError)) throw err;
+      if (this.liveness.name !== 'none') this.logger.warn(`Liveness unavailable for job ${job.id}: ${err.message}`);
+      return { outcome: null, performed: true };
+    }
   }
 
   /** ID portrait vs selfie. `face` is null when no comparison happened; `missing` says why if documents were absent. */
@@ -167,25 +194,32 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     job: ClaimedJob,
     documents: { kind: DocumentKind; storageKey: string }[],
     threshold: number,
-  ): Promise<{ face: FaceOutcome | null; missing: string[] }> {
+    referenceImage?: Buffer,
+  ): Promise<{ face: FaceOutcome | null; missing: string[]; source: 'liveness' | 'selfie' }> {
     const front = documents.find((d) => d.kind === DocumentKind.ID_FRONT);
     const selfie = documents.find((d) => d.kind === DocumentKind.SELFIE);
+    const source = referenceImage ? 'liveness' : 'selfie';
     if (!front || !selfie) {
-      return { face: null, missing: [...(front ? [] : ['ID_FRONT_MISSING']), ...(selfie ? [] : ['SELFIE_MISSING'])] };
+      return { face: null, missing: [...(front ? [] : ['ID_FRONT_MISSING']), ...(selfie ? [] : ['SELFIE_MISSING'])], source };
     }
     try {
-      const [idImage, selfieImage] = await Promise.all([this.storage.get(front.storageKey), this.storage.get(selfie.storageKey)]);
-      return { face: faceOutcome(await this.face.compare(idImage, selfieImage), threshold), missing: [] };
+      // The image captured during the liveness challenge wins over the uploaded selfie, so the
+      // match is against the person who actually passed liveness.
+      const [idImage, selfieImage] = await Promise.all([
+        this.storage.get(front.storageKey),
+        referenceImage ?? this.storage.get(selfie.storageKey),
+      ]);
+      return { face: faceOutcome(await this.face.compare(idImage, selfieImage), threshold), missing: [], source };
     } catch (err) {
       if (!(err instanceof FaceUnavailableError)) throw err;
       // Every session now goes to review; make a broken deployment visible (but not a deliberate "none").
       if (this.face.name !== 'none') this.logger.warn(`Face matching unavailable for job ${job.id}: ${err.message}`);
-      return { face: null, missing: [] };
+      return { face: null, missing: [], source };
     }
   }
 
   /** Records the result and moves the session, only if it is still PROCESSING. */
-  private async finish(job: ClaimedJob, outcome: CheckOutcome, providers: { ocr: string; face: string | null }) {
+  private async finish(job: ClaimedJob, outcome: CheckOutcome, providers: { ocr: string; face: string | null; liveness: string | null }) {
     const committed = await this.prisma.$transaction(async (tx) => {
       // Ownership fence: if our lease lapsed and another worker re-claimed the job, we are stale
       // and must not record anything.
@@ -219,6 +253,10 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
           faceStatus: outcome.face?.status ?? null,
           faceSimilarity: outcome.face?.similarity ?? null,
           faceProvider: providers.face,
+          faceSource: outcome.faceSource,
+          livenessStatus: outcome.liveness?.status ?? null,
+          livenessConfidence: outcome.liveness?.confidence ?? null,
+          livenessProvider: providers.liveness,
         },
       });
       await tx.auditLog.create({
@@ -248,7 +286,7 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     this.logger.warn(`Verification job ${job.id} attempt ${job.attempts} failed: ${(err as Error).name}${err instanceof OcrError ? ` (${err.reason})` : ''}`);
     try {
       if (job.attempts >= MAX_ATTEMPTS) {
-        await this.finish(job, emptyOutcome('PIPELINE_ERROR'), { ocr: this.ocr.name, face: null });
+        await this.finish(job, emptyOutcome('PIPELINE_ERROR'), { ocr: this.ocr.name, face: null, liveness: null });
         return;
       }
       const base = this.int('VERIFICATION_RETRY_BASE_MS', 5000);

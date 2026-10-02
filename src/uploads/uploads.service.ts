@@ -1,9 +1,10 @@
-import { BadRequestException, GoneException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, GoneException, Inject, Injectable, NotImplementedException, NotFoundException } from '@nestjs/common';
 import { DocumentKind, SessionStatus } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { sha256 } from '../common/crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
+import { LIVENESS_PROVIDER, LivenessProvider, LivenessUnavailableError } from '../liveness/liveness-provider';
 import { VerificationWorker } from '../verification/verification.worker';
 import { detectImageType } from './image-type';
 
@@ -13,6 +14,7 @@ export class UploadsService {
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
     private readonly worker: VerificationWorker,
+    @Inject(LIVENESS_PROVIDER) private readonly liveness: LivenessProvider,
   ) {}
 
   /** Resolves a still-open session from its upload token. */
@@ -32,6 +34,41 @@ export class UploadsService {
       throw new GoneException('Session expired');
     }
     return session;
+  }
+
+  /**
+   * Starts a liveness challenge for the session. The client widget runs it against the provider;
+   * the pipeline reads the verdict after submit. Calling again replaces the earlier challenge.
+   */
+  async startLiveness(token: string) {
+    const session = await this.openSession(token);
+    let created;
+    try {
+      created = await this.liveness.createSession();
+    } catch (err) {
+      if (err instanceof LivenessUnavailableError) throw new NotImplementedException('Liveness is not available');
+      throw err;
+    }
+    // Optimistic: only replace the challenge this request saw. Two concurrent starts cannot both
+    // succeed, so a client is never handed an id that another request has already replaced.
+    const stored = await this.prisma.session.updateMany({
+      where: {
+        id: session.id,
+        status: SessionStatus.PENDING,
+        expiresAt: { gt: new Date() },
+        livenessSessionId: session.livenessSessionId,
+      },
+      data: { livenessSessionId: created.providerSessionId },
+    });
+    if (stored.count === 0) {
+      const now = await this.prisma.session.findUnique({ where: { id: session.id } });
+      if (!now || now.status !== SessionStatus.PENDING || now.expiresAt.getTime() <= Date.now()) {
+        throw new GoneException('Session is closed');
+      }
+      throw new ConflictException('A liveness challenge was started elsewhere; retry');
+    }
+    await this.prisma.auditLog.create({ data: { sessionId: session.id, event: 'liveness.started' } });
+    return { provider: this.liveness.name, sessionId: created.providerSessionId, ...(created.clientConfig ?? {}) };
   }
 
   async addDocument(token: string, kind: DocumentKind, data: Buffer) {
