@@ -33,6 +33,7 @@ describe('checkIdBack / decide', () => {
   it.each([
     ['below the threshold', faceOutcome({ similarity: 89.9 }, 90), 'FACE_BELOW_THRESHOLD'],
     ['no face found', faceOutcome({ status: 'no_face' }, 90), 'FACE_NOT_DETECTED'],
+    ['several faces in the selfie', faceOutcome({ status: 'multiple_faces' }, 90), 'FACE_MULTIPLE_FACES'],
     ['an unusable image', faceOutcome({ status: 'unusable_image' }, 90), 'FACE_IMAGE_UNUSABLE'],
     ['face matching unavailable', null, 'FACE_UNAVAILABLE'],
     ['no face check at all', undefined, undefined],
@@ -46,5 +47,13 @@ describe('checkIdBack / decide', () => {
   it('applies the threshold inclusively', () => {
     expect(faceOutcome({ similarity: 90 }, 90).status).toBe('match');
     expect(faceOutcome({ similarity: 90 }, 90.1).status).toBe('below_threshold');
+  });
+
+  it('reports missing documents separately from an unavailable provider', () => {
+    const doc = checkIdBack(text(), who, now);
+    expect(withFace(doc, null, ['SELFIE_MISSING']).issueCodes).toEqual(['SELFIE_MISSING']);
+    expect(withFace(doc, null, ['ID_FRONT_MISSING', 'SELFIE_MISSING']).issueCodes).toEqual(['ID_FRONT_MISSING', 'SELFIE_MISSING']);
+    expect(withFace(doc, null).issueCodes).toEqual(['FACE_UNAVAILABLE']);
+    expect(decide(withFace(doc, null, ['SELFIE_MISSING']), true)).toBe('NEEDS_REVIEW');
   });
 });

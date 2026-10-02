@@ -1,12 +1,13 @@
 import { FieldMatch, IdentityComparison, LenientResult, compareIdentity, extractTd1Lines, parseKosovoTd1 } from '../documents/mrz';
 import type { ExpectedIdentity } from '../documents/mrz';
 
-/** Pass/fail outcome of reading and checking the ID back. Holds no values read from the card. */
+/** Selfie-to-ID comparison against the tenant's threshold. */
 export interface FaceOutcome {
-  status: 'match' | 'below_threshold' | 'no_face' | 'unusable_image';
+  status: 'match' | 'below_threshold' | 'no_face' | 'multiple_faces' | 'unusable_image';
   similarity: number | null;
 }
 
+/** Pass/fail outcome of reading and checking the documents. Holds no values read from the card. */
 export interface CheckOutcome {
   /** Null when the face check did not run (see the FACE_* issue codes). */
   face: FaceOutcome | null;
@@ -65,18 +66,21 @@ export function checkIdBack(ocrText: string, expected: ExpectedIdentity, now = n
   };
 }
 
-const FACE_CODE = { below_threshold: 'FACE_BELOW_THRESHOLD', no_face: 'FACE_NOT_DETECTED', unusable_image: 'FACE_IMAGE_UNUSABLE' } as const;
+const FACE_CODE = { below_threshold: 'FACE_BELOW_THRESHOLD', no_face: 'FACE_NOT_DETECTED', multiple_faces: 'FACE_MULTIPLE_FACES', unusable_image: 'FACE_IMAGE_UNUSABLE' } as const;
 
 /** Turns a raw similarity into a pass/fail against the tenant's threshold. */
-export function faceOutcome(r: { similarity: number } | { status: 'no_face' | 'unusable_image' }, threshold: number): FaceOutcome {
+export function faceOutcome(r: { similarity: number } | { status: 'no_face' | 'multiple_faces' | 'unusable_image' }, threshold: number): FaceOutcome {
   if ('similarity' in r) return { status: r.similarity >= threshold ? 'match' : 'below_threshold', similarity: r.similarity };
   return { status: r.status, similarity: null };
 }
 
-/** Adds the face result (or, with null, a FACE_UNAVAILABLE issue) to the document outcome. */
-export function withFace(outcome: CheckOutcome, face: FaceOutcome | null): CheckOutcome {
-  const code = face === null ? 'FACE_UNAVAILABLE' : face.status === 'match' ? null : FACE_CODE[face.status];
-  return { ...outcome, face, issueCodes: code ? dedupe([...outcome.issueCodes, code]) : outcome.issueCodes };
+/**
+ * Adds the face result to the document outcome. With no result, `missing` names documents that
+ * were absent (reported as such); otherwise the provider was unavailable (FACE_UNAVAILABLE).
+ */
+export function withFace(outcome: CheckOutcome, face: FaceOutcome | null, missing: string[] = []): CheckOutcome {
+  const codes = face === null ? (missing.length ? missing : ['FACE_UNAVAILABLE']) : face.status === 'match' ? [] : [FACE_CODE[face.status]];
+  return { ...outcome, face, issueCodes: dedupe([...outcome.issueCodes, ...codes]) };
 }
 
 const dedupe = (codes: string[]) => [...new Set(codes)];

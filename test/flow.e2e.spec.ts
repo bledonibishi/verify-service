@@ -1,6 +1,6 @@
 // Runs the full flow against a real Postgres (DATABASE_URL). No external services are contacted:
 // the webhook target is a local HTTP server started by the test.
-import { INestApplication, ValidationPipe } from '@nestjs/common';
+import { INestApplication, Logger, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { PrismaClient } from '@prisma/client';
 import { randomBytes } from 'crypto';
@@ -509,7 +509,7 @@ describe('verification flow (e2e)', () => {
         await setAutoApprove(true);
         const body = await settled(await submitted('face-ok'));
         expect(body.status).toBe('APPROVED');
-        expect(body.verification.face).toEqual({ status: 'match', similarity: 95 });
+        expect(body.verification.face).toEqual({ status: 'match', similarity: 95, provider: 'fake-face' });
       });
 
       it('applies the tenant threshold', async () => {
@@ -517,12 +517,13 @@ describe('verification flow (e2e)', () => {
         await setThreshold(99);
         const body = await settled(await submitted('face-strict'));
         expect(body.status).toBe('NEEDS_REVIEW');
-        expect(body.verification.face).toEqual({ status: 'below_threshold', similarity: 95 });
+        expect(body.verification.face).toEqual({ status: 'below_threshold', similarity: 95, provider: 'fake-face' });
         expect(body.verification.issues).toEqual(['FACE_BELOW_THRESHOLD']);
       });
 
       it.each([
         ['no face', { status: 'no_face' } as FaceComparison, 'FACE_NOT_DETECTED'],
+        ['several faces', { status: 'multiple_faces' } as FaceComparison, 'FACE_MULTIPLE_FACES'],
         ['an unusable image', { status: 'unusable_image' } as FaceComparison, 'FACE_IMAGE_UNUSABLE'],
         ['a different person', { status: 'compared', similarity: 12 } as FaceComparison, 'FACE_BELOW_THRESHOLD'],
       ])('sends %s to review even with auto-approve on', async (_n, result, code) => {
@@ -536,14 +537,19 @@ describe('verification flow (e2e)', () => {
       it('goes to review without retrying when face matching is unavailable', async () => {
         await setAutoApprove(true);
         const before = faceCalls;
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
         faceImpl = async () => {
           throw new FaceUnavailableError('no credentials');
         };
         const body = await settled(await submitted('face-unavailable'));
         expect(body.status).toBe('NEEDS_REVIEW');
-        expect(body.verification.face).toEqual({ status: null, similarity: null });
+        expect(body.verification.face).toEqual({ status: null, similarity: null, provider: null });
         expect(body.verification.issues).toEqual(['FACE_UNAVAILABLE']);
         expect(faceCalls - before).toBe(1);
+        // A broken deployment must be visible in the logs, without any image or document data
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('Face matching unavailable'));
+        expect(JSON.stringify(warn.mock.calls)).not.toContain(SAMPLE.surname);
+        warn.mockRestore();
       });
 
       it('retries a transient face failure', async () => {

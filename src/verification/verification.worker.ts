@@ -158,24 +158,29 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
       }
     }
 
-    const face = await this.checkFace(session.documents, session.tenant.faceMatchThreshold);
-    return { outcome: withFace(mrz, face), providers: { ocr: ocrName, face: face ? this.face.name : null } };
+    const { face, missing } = await this.checkFace(job, session.documents, session.tenant.faceMatchThreshold);
+    return { outcome: withFace(mrz, face, missing), providers: { ocr: ocrName, face: face ? this.face.name : null } };
   }
 
-  /** ID portrait vs selfie. Null when face matching is unavailable (the outcome records why). */
+  /** ID portrait vs selfie. `face` is null when no comparison happened; `missing` says why if documents were absent. */
   private async checkFace(
+    job: ClaimedJob,
     documents: { kind: DocumentKind; storageKey: string }[],
     threshold: number,
-  ): Promise<FaceOutcome | null> {
+  ): Promise<{ face: FaceOutcome | null; missing: string[] }> {
     const front = documents.find((d) => d.kind === DocumentKind.ID_FRONT);
     const selfie = documents.find((d) => d.kind === DocumentKind.SELFIE);
-    if (!front || !selfie) return null;
+    if (!front || !selfie) {
+      return { face: null, missing: [...(front ? [] : ['ID_FRONT_MISSING']), ...(selfie ? [] : ['SELFIE_MISSING'])] };
+    }
     try {
       const [idImage, selfieImage] = await Promise.all([this.storage.get(front.storageKey), this.storage.get(selfie.storageKey)]);
-      return faceOutcome(await this.face.compare(idImage, selfieImage), threshold);
+      return { face: faceOutcome(await this.face.compare(idImage, selfieImage), threshold), missing: [] };
     } catch (err) {
-      if (err instanceof FaceUnavailableError) return null;
-      throw err;
+      if (!(err instanceof FaceUnavailableError)) throw err;
+      // Every session now goes to review; make a broken deployment visible (but not a deliberate "none").
+      if (this.face.name !== 'none') this.logger.warn(`Face matching unavailable for job ${job.id}: ${err.message}`);
+      return { face: null, missing: [] };
     }
   }
 

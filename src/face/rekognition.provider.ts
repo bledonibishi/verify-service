@@ -1,8 +1,11 @@
 import { CompareFacesCommand, RekognitionClient } from '@aws-sdk/client-rekognition';
+import { detectImageType } from '../uploads/image-type';
 import { FaceComparison, FaceProvider, FaceUnavailableError } from './face-provider';
 
-/** Rekognition accepts at most 5 MB of image bytes per call. */
+/** Rekognition accepts at most 5 MB of image bytes per call, and only JPEG and PNG. */
 const MAX_BYTES = 5 * 1024 * 1024;
+const SUPPORTED = new Set(['image/jpeg', 'image/png']);
+const supported = (img: Buffer) => img.length <= MAX_BYTES && SUPPORTED.has(detectImageType(img) ?? '');
 
 const UNAVAILABLE = new Set([
   'CredentialsProviderError',
@@ -29,7 +32,8 @@ export class RekognitionProvider implements FaceProvider {
   }
 
   async compare(idImage: Buffer, selfie: Buffer): Promise<FaceComparison> {
-    if (idImage.length > MAX_BYTES || selfie.length > MAX_BYTES) return { status: 'unusable_image' };
+    // Checked here so unsupported images are never sent to a third party.
+    if (!supported(idImage) || !supported(selfie)) return { status: 'unusable_image' };
     try {
       const res = await this.client.send(
         new CompareFacesCommand({
@@ -37,20 +41,23 @@ export class RekognitionProvider implements FaceProvider {
           TargetImage: { Bytes: selfie },
           // Return every comparison; the tenant's threshold is applied by the decision logic.
           SimilarityThreshold: 0,
-          QualityFilter: 'NONE',
+          // Drops tiny or blurry faces so they can't be the one that matches.
+          QualityFilter: 'AUTO',
         }),
       );
-      const scores = [...(res.FaceMatches ?? []).map((m) => m.Similarity), ...(res.UnmatchedFaces ?? []).map(() => 0)];
-      const best = Math.max(-1, ...scores.filter((s): s is number => typeof s === 'number'));
-      return best < 0 ? { status: 'no_face' } : { status: 'compared', similarity: best };
+      // The selfie must hold exactly one face: otherwise a second person, the ID card itself or
+      // a printed photo could supply the matching face.
+      const targets = [...(res.FaceMatches ?? []).map((m) => m.Similarity ?? 0), ...(res.UnmatchedFaces ?? []).map(() => 0)];
+      if (targets.length === 0) return { status: 'no_face' };
+      if (targets.length > 1) return { status: 'multiple_faces' };
+      return { status: 'compared', similarity: targets[0] };
     } catch (err) {
       const name = (err as Error).name;
       if (UNAVAILABLE.has(name)) throw new FaceUnavailableError('face provider rejected credentials');
       if (UNUSABLE.has(name)) return { status: 'unusable_image' };
-      // "There are no faces in the image" arrives as InvalidParameterException.
-      if (name === 'InvalidParameterException') {
-        return /no faces/i.test((err as Error).message) ? { status: 'no_face' } : { status: 'unusable_image' };
-      }
+      // Format and size were validated above, so this is what Rekognition reports when it finds
+      // no usable face in the ID portrait (its message text is not stable enough to match on).
+      if (name === 'InvalidParameterException') return { status: 'no_face' };
       throw err; // throttling, network, 5xx: let the job retry
     }
   }
