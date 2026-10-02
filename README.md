@@ -9,9 +9,12 @@ Calling projects never store the ID images — they only receive a status.
 Step 1 of the roadmap is in place: tenants, sessions, encrypted uploads, signed webhooks.
 
 - [x] Tenants + API keys, sessions, uploads, encrypted storage, signed webhooks
-- [ ] Admin review queue / UI
-- [ ] Face match + ID field extraction (pluggable providers)
-- [ ] Liveness, SDK / embeddable upload widget, document retention job, webhook retries
+- [x] Kosovo MRZ module: TD1 parser, check digits, OCR repair, name/DOB cross-check (`src/documents/mrz`, see [docs/kosovo-documents.md](docs/kosovo-documents.md))
+- [ ] Wire MRZ checks into the submit pipeline; driving licence field extraction
+- [ ] Admin review queue / UI (individual reviewer accounts)
+- [ ] Face match + liveness (pluggable providers)
+- [ ] Per-tenant retention, evidence export, NFC chip SDK, billing
+- [ ] SDK / embeddable upload widget, retention job, webhook retries
 
 ## Run locally
 
