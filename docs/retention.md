@@ -55,5 +55,5 @@ The migration sets every **existing** tenant's document window equal to its reco
 
 - Deleting from the S3 adapter (task 5) must keep the same files-before-rows order and handle object versioning.
 - Backups are outside this service: a database or disk backup keeps data until the backup itself expires.
-- The webhook outbox (task 5) will hold event payloads; those need the same erasure when it lands.
+- Webhook events (the outbox) are erased with their session; delivered events are also deleted after `WEBHOOK_EVENT_RETENTION_DAYS` (7) and failed ones after `WEBHOOK_FAILED_RETENTION_DAYS` (30). A pending event for a tenant that is down can live as long as its retries last (about a day), then becomes `FAILED`.
 - Reviewer accounts and the tenant's own copies of data are the tenant's responsibility.

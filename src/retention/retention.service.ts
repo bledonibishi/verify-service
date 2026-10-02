@@ -9,6 +9,7 @@ export interface RetentionReport {
   recordsDeleted: number;
   abandonedDeleted: number;
   failed: number;
+  webhookEventsDeleted: number;
 }
 
 /**
@@ -37,7 +38,7 @@ export class RetentionService {
 
   async run(): Promise<RetentionReport> {
     const BATCH = this.batch();
-    const report: RetentionReport = { documentsDeleted: 0, recordsDeleted: 0, abandonedDeleted: 0, failed: 0 };
+    const report: RetentionReport = { documentsDeleted: 0, recordsDeleted: 0, abandonedDeleted: 0, failed: 0, webhookEventsDeleted: 0 };
 
     // 1. Whole records past their window go first, so their documents are not handled twice.
     const record = Prisma.sql`s.decided_at IS NOT NULL AND s.decided_at + make_interval(days => t.record_retention_days) <= now()`;
@@ -70,6 +71,13 @@ export class RetentionService {
       report.failed += r.failed;
       if (r.attempted === 0) break;
     }
+
+    // Webhook events: delivered ones are kept a short while for debugging, failed ones a month
+    const keep = (key: string, fallback: number) => {
+      const n = parseInt(this.config.get<string>(key) ?? '', 10);
+      return Number.isFinite(n) && n >= 0 ? n : fallback;
+    };
+    report.webhookEventsDeleted = await this.purge.purgeWebhookEvents(keep('WEBHOOK_EVENT_RETENTION_DAYS', 7), keep('WEBHOOK_FAILED_RETENTION_DAYS', 30));
 
     if (report.failed > 0) this.logger.warn(`Retention run: ${report.failed} session(s) failed and will be retried`);
     return report;

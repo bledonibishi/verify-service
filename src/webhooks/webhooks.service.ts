@@ -1,50 +1,38 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { hmacSign } from '../common/crypto';
 
-export interface WebhookTarget {
-  webhookUrl: string | null;
-  webhookSecret: string;
-}
-
-export interface WebhookEvent {
-  type: 'session.status_changed';
-  sessionId: string;
-  externalRef: string;
-  status: string;
-  occurredAt: string;
-  /** Automated check results; present once the pipeline has run. */
-  verification?: unknown;
-  /** Human review decision, present when a reviewer decided the session. */
-  review?: unknown;
-}
+export type DeliveryResult = { ok: true } | { ok: false; code: string };
 
 /**
- * Sends signed webhooks. Signature header: `X-Verify-Signature: t=<unix>,v1=<hmac>`
- * where hmac = HMAC-SHA256(secret, `${t}.${body}`). Receivers should reject old timestamps.
- * Delivery is best-effort for now; a retry queue is a planned follow-up.
+ * One signed HTTP delivery attempt. Signature header: `X-Verify-Signature: t=<unix>,v1=<hmac>`
+ * where hmac = HMAC-SHA256(secret, `${t}.${body}`); the timestamp is fresh on every attempt, the
+ * body is not. Receivers should reject old timestamps and dedupe on `X-Verify-Event-Id`.
+ * Retries and bookkeeping live in the dispatcher, not here.
  */
 @Injectable()
 export class WebhooksService {
-  private readonly logger = new Logger(WebhooksService.name);
-
-  async send(target: WebhookTarget, event: WebhookEvent): Promise<void> {
-    if (!target.webhookUrl) return;
-    const body = JSON.stringify(event);
+  async deliver(url: string, secret: string, eventId: string, body: string, timeoutMs: number): Promise<DeliveryResult> {
     const t = Math.floor(Date.now() / 1000);
-    const signature = hmacSign(target.webhookSecret, `${t}.${body}`);
     try {
-      const res = await fetch(target.webhookUrl, {
+      const res = await fetch(url, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
-          'x-verify-signature': `t=${t},v1=${signature}`,
+          'x-verify-signature': `t=${t},v1=${hmacSign(secret, `${t}.${body}`)}`,
+          'x-verify-event-id': eventId,
         },
         body,
-        signal: AbortSignal.timeout(10_000),
+        // A redirect would send a signed body somewhere the tenant did not configure
+        redirect: 'manual',
+        signal: AbortSignal.timeout(timeoutMs),
       });
-      if (!res.ok) this.logger.warn(`Webhook returned ${res.status} for session ${event.sessionId}`);
+      // Drain so the connection can be reused; the body is never read into logs or the database
+      await res.arrayBuffer().catch(() => undefined);
+      if (res.status >= 200 && res.status < 300) return { ok: true };
+      return { ok: false, code: `http_${res.status}` };
     } catch (err) {
-      this.logger.warn(`Webhook failed for session ${event.sessionId}: ${(err as Error).message}`);
+      const name = (err as Error).name;
+      return { ok: false, code: name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'network' };
     }
   }
 }
