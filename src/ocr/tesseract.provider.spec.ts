@@ -30,10 +30,11 @@ describe('TesseractProvider', () => {
     const err = await new TesseractProvider(bin).readText(Buffer.from('x')).catch((e) => e);
     expect(err).toBeInstanceOf(Error);
     expect(err.message).not.toContain('SECRET');
+    expect(err.reason).toBe('exit');
   });
 
   it('kills a hung engine after the timeout', async () => {
     const bin = script('hang', 'sleep 30');
-    await expect(new TesseractProvider(bin, 'eng', 200).readText(Buffer.from('x'))).rejects.toThrow('timed out');
+    await expect(new TesseractProvider(bin, 'eng', 200).readText(Buffer.from('x'))).rejects.toMatchObject({ reason: 'timeout' });
   });
 });

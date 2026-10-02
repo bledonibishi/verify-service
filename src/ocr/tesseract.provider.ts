@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { OcrProvider, OcrResult, OcrUnavailableError } from './ocr-provider';
+import { OcrError, OcrProvider, OcrResult, OcrUnavailableError } from './ocr-provider';
 
 /**
  * Self-hosted OCR through the `tesseract` command line. The image goes in on stdin and the text
@@ -33,14 +33,14 @@ export class TesseractProvider implements OcrProvider {
       };
       const timer = setTimeout(() => {
         child.kill('SIGKILL');
-        done(() => reject(new Error('OCR timed out')));
+        done(() => reject(new OcrError('timeout')));
       }, this.timeoutMs);
 
       child.stdout.on('data', (c: Buffer) => {
         size += c.length;
         if (size > 1_000_000) {
           child.kill('SIGKILL');
-          done(() => reject(new Error('OCR output too large')));
+          done(() => reject(new OcrError('output_too_large')));
           return;
         }
         chunks.push(c);
@@ -50,12 +50,12 @@ export class TesseractProvider implements OcrProvider {
       child.stdin.on('error', () => undefined);
       child.on('error', (err: NodeJS.ErrnoException) =>
         done(() =>
-          reject(err.code === 'ENOENT' ? new OcrUnavailableError('tesseract is not installed') : new Error('OCR failed to start')),
+          reject(err.code === 'ENOENT' ? new OcrUnavailableError('tesseract is not installed') : new OcrError('spawn')),
         ),
       );
       child.on('close', (code) =>
         done(() =>
-          code === 0 ? resolve({ text: Buffer.concat(chunks).toString('utf8') }) : reject(new Error(`OCR exited with code ${code}`)),
+          code === 0 ? resolve({ text: Buffer.concat(chunks).toString('utf8') }) : reject(new OcrError('exit')),
         ),
       );
       child.stdin.end(image);

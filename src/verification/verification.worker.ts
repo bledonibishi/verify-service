@@ -4,7 +4,7 @@ import { DocumentKind, Prisma, SessionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { WebhooksService } from '../webhooks/webhooks.service';
-import { OCR_PROVIDER, OcrProvider, OcrUnavailableError } from '../ocr/ocr-provider';
+import { OCR_PROVIDER, OcrError, OcrProvider, OcrUnavailableError } from '../ocr/ocr-provider';
 import { CheckOutcome, checkIdBack, decide, emptyOutcome } from './decision';
 import { toSummary } from './summary';
 
@@ -26,9 +26,10 @@ interface ClaimedJob {
 export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(VerificationWorker.name);
   private timer?: NodeJS.Timeout;
-  private running: Promise<void> | null = null;
-  private rerun = false;
+  private readonly loops = new Set<Promise<void>>();
   private stopped = false;
+  private readonly enabled: boolean;
+  private readonly concurrency: number;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -36,19 +37,21 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     private readonly webhooks: WebhooksService,
     private readonly config: ConfigService,
     @Inject(OCR_PROVIDER) private readonly ocr: OcrProvider,
-  ) {}
+  ) {
+    this.enabled = config.get('VERIFICATION_WORKER_ENABLED') !== 'false';
+    this.concurrency = Math.max(1, this.int('VERIFICATION_CONCURRENCY', 2));
+  }
 
   onApplicationBootstrap() {
-    if (this.config.get('VERIFICATION_WORKER_ENABLED') === 'false') return;
-    const interval = this.int('VERIFICATION_POLL_MS', 2000);
-    this.timer = setInterval(() => void this.wake(), interval);
+    if (!this.enabled) return;
+    this.timer = setInterval(() => void this.wake(), this.int('VERIFICATION_POLL_MS', 2000));
     void this.wake();
   }
 
   async onModuleDestroy() {
     this.stopped = true;
     if (this.timer) clearInterval(this.timer);
-    await this.running;
+    await Promise.all(this.loops);
   }
 
   private int(key: string, fallback: number): number {
@@ -56,28 +59,32 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     return Number.isFinite(n) && n >= 0 ? n : fallback;
   }
 
-  /** Starts draining the queue unless a drain is already running (then it loops once more). */
+  /**
+   * Tops up the drain loops to the concurrency limit, so one slow OCR call never blocks the rest
+   * of the queue. A worker disabled by configuration never claims jobs, however it is woken.
+   */
   wake(): Promise<void> {
-    if (this.stopped) return Promise.resolve();
-    if (this.running) {
-      this.rerun = true;
-      return this.running;
+    if (!this.enabled || this.stopped) return Promise.resolve();
+    while (this.loops.size < this.concurrency) {
+      const loop: Promise<void> = this.drain().finally(() => this.loops.delete(loop));
+      this.loops.add(loop);
     }
-    this.running = (async () => {
-      try {
-        do {
-          this.rerun = false;
-          while (!this.stopped && (await this.tick())) {
-            /* keep going until the queue is empty */
-          }
-        } while (this.rerun && !this.stopped);
-      } catch (err) {
-        this.logger.error(`Worker loop failed: ${(err as Error).name}`);
-      } finally {
-        this.running = null;
+    return Promise.all(this.loops).then(() => undefined);
+  }
+
+  private async drain() {
+    try {
+      while (!this.stopped && (await this.tick())) {
+        /* keep going until the queue is empty */
       }
-    })();
-    return this.running;
+    } catch (err) {
+      this.logger.error(`Worker loop failed: ${(err as Error).name}`);
+    }
+  }
+
+  /** Matches the job only while this attempt still holds it; each claim bumps `attempts`. */
+  private fence(job: ClaimedJob) {
+    return { id: job.id, status: 'RUNNING' as const, attempts: job.attempts };
   }
 
   /** Claims and processes one job. Returns false when there was nothing to do. */
@@ -122,7 +129,7 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
       include: { documents: true },
     });
     if (!session || session.status !== SessionStatus.PROCESSING) {
-      await this.prisma.verificationJob.update({ where: { id: job.id }, data: { status: 'DONE', lockedUntil: null } });
+      await this.prisma.verificationJob.updateMany({ where: this.fence(job), data: { status: 'DONE', lockedUntil: null } });
       return null;
     }
     const back = session.documents.find((d) => d.kind === DocumentKind.ID_BACK);
@@ -148,6 +155,10 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
   /** Records the result and moves the session, only if it is still PROCESSING. */
   private async finish(job: ClaimedJob, outcome: CheckOutcome, provider: string) {
     const committed = await this.prisma.$transaction(async (tx) => {
+      // Ownership fence: if our lease lapsed and another worker re-claimed the job, we are stale
+      // and must not record anything.
+      const owned = await tx.verificationJob.updateMany({ where: this.fence(job), data: { status: 'DONE', lockedUntil: null } });
+      if (owned.count === 0) return null;
       const session = await tx.session.findUnique({ where: { id: job.session_id }, include: { tenant: true } });
       if (!session) return null;
       const decision = decide(outcome, session.tenant.autoApprove);
@@ -157,7 +168,6 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
         where: { id: session.id, status: SessionStatus.PROCESSING },
         data: { status: decision },
       });
-      await tx.verificationJob.update({ where: { id: job.id }, data: { status: 'DONE', lockedUntil: null } });
       if (moved.count === 0) return null;
       const result = await tx.verificationResult.create({
         data: {
@@ -200,15 +210,15 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
   /** Transient failure: retry with backoff, then give up and send the session to a person. */
   private async fail(job: ClaimedJob, err: unknown) {
     // Only the error class is logged: messages from OCR or storage could carry document text.
-    this.logger.warn(`Verification job ${job.id} attempt ${job.attempts} failed: ${(err as Error).name}`);
+    this.logger.warn(`Verification job ${job.id} attempt ${job.attempts} failed: ${(err as Error).name}${err instanceof OcrError ? ` (${err.reason})` : ''}`);
     try {
       if (job.attempts >= MAX_ATTEMPTS) {
         await this.finish(job, emptyOutcome('PIPELINE_ERROR'), this.ocr.name);
         return;
       }
       const base = this.int('VERIFICATION_RETRY_BASE_MS', 5000);
-      await this.prisma.verificationJob.update({
-        where: { id: job.id },
+      await this.prisma.verificationJob.updateMany({
+        where: this.fence(job),
         data: { status: 'QUEUED', lockedUntil: null, runAfter: new Date(Date.now() + base * job.attempts ** 2) },
       });
     } catch (inner) {

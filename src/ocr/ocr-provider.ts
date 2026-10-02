@@ -17,3 +17,11 @@ export class OcrUnavailableError extends Error {
     this.name = 'OcrUnavailableError';
   }
 }
+
+/** Transient OCR failure. `reason` is a fixed code, safe to log (the engine's own output is not). */
+export class OcrError extends Error {
+  constructor(readonly reason: 'timeout' | 'output_too_large' | 'exit' | 'spawn') {
+    super(`OCR failed: ${reason}`);
+    this.name = 'OcrError';
+  }
+}

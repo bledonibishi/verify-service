@@ -441,6 +441,48 @@ describe('verification flow (e2e)', () => {
       expect(await prisma.verificationResult.count({ where: { sessionId: id } })).toBe(0);
     });
 
+    it('ignores a stale worker whose lease lapsed and was re-claimed (fenced)', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let n = 0;
+      const before = ocrCalls;
+      ocrImpl = async () => {
+        if (++n === 1) {
+          await gate; // worker A hangs here
+          throw new Error('late failure'); // ...and fails after losing its lease
+        }
+        return { text: mrzText() };
+      };
+      const id = await submitted('stale');
+      await waitFor(() => ocrCalls - before >= 1);
+      await prisma.verificationJob.update({ where: { sessionId: id }, data: { lockedUntil: new Date(Date.now() - 1000) } });
+      void worker.wake(); // worker B re-claims and finishes (A is still blocked, so don't await)
+      expect((await settled(id)).verification.mrz.valid).toBe(true);
+      release();
+      await new Promise((r) => setTimeout(r, 300)); // let A's failure path run
+      const job = await prisma.verificationJob.findUnique({ where: { sessionId: id } });
+      expect(job).toMatchObject({ status: 'DONE', attempts: 2 }); // A did not requeue B's finished job
+      expect(ocrCalls - before).toBe(2);
+      expect(await prisma.verificationResult.count({ where: { sessionId: id } })).toBe(1);
+    });
+
+    it('does not let one slow OCR call block other sessions', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      let n = 0;
+      ocrImpl = async () => {
+        if (++n === 1) await gate;
+        return { text: mrzText() };
+      };
+      const slow = await submitted('slow-one');
+      await waitFor(() => n >= 1);
+      const fast = await submitted('fast-one');
+      expect((await settled(fast)).status).toBe('NEEDS_REVIEW');
+      expect((await request(http()).get(`/v1/sessions/${slow}`).set(auth())).body.status).toBe('PROCESSING');
+      release();
+      expect((await settled(slow)).status).toBe('NEEDS_REVIEW');
+    });
+
     it('does not expose another tenant’s verification result', async () => {
       ocrImpl = async () => ({ text: mrzText() });
       const id = await submitted('isolation');
