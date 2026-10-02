@@ -51,9 +51,9 @@ The migration sets every **existing** tenant's document window equal to its reco
 
 ## Known gaps
 
-- **All instances must share one storage.** The local-disk adapter is single-host: with several hosts each holding its own directory, a job on a host without the file would treat "not there" as erased. Use shared storage (the S3 adapter, task 5) before running more than one instance.
+- **All instances must share one storage.** The local-disk driver is single-host: with several hosts each holding its own directory, a job on a host without the file would treat "not there" as erased. Use `STORAGE_DRIVER=s3` ([storage](storage.md)) before running more than one instance, and keep bucket **versioning off**, or deleted objects survive as old versions.
 
-- Deleting from the S3 adapter (task 5) must keep the same files-before-rows order and handle object versioning.
+- The S3 driver keeps the same files-before-rows order; bucket versioning must stay off (see [storage](storage.md)).
 - Backups are outside this service: a database or disk backup keeps data until the backup itself expires.
 - The webhook outbox (task 5) will hold event payloads; those need the same erasure when it lands.
 - Reviewer accounts and the tenant's own copies of data are the tenant's responsibility.
