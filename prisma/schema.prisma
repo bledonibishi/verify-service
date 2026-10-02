@@ -31,6 +31,8 @@ model Tenant {
   // When true, a submission whose automated checks all pass cleanly is approved without a
   // reviewer. Off by default: every submission then goes to manual review.
   autoApprove   Boolean   @default(false) @map("auto_approve")
+  // Minimum selfie-to-ID similarity (0-100) that counts as a face match
+  faceMatchThreshold Float @default(90) @map("face_match_threshold")
   createdAt     DateTime  @default(now()) @map("created_at")
   sessions      Session[]
 
@@ -131,6 +133,10 @@ model VerificationResult {
   checks          Json
   issueCodes      String[] @map("issue_codes")
   ocrProvider     String   @map("ocr_provider")
+  // match | below_threshold | no_face | unusable_image; null when the check did not run
+  faceStatus      String?  @map("face_status")
+  faceSimilarity  Float?   @map("face_similarity")
+  faceProvider    String?  @map("face_provider")
   createdAt       DateTime @default(now()) @map("created_at")
 
   @@map("verification_results")

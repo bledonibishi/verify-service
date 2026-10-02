@@ -13,7 +13,8 @@ Step 1 of the roadmap is in place: tenants, sessions, encrypted uploads, signed 
 - [x] Verification pipeline: background worker reads the ID back MRZ (Tesseract), checks it against the expected identity and expiry, stores flags and issue codes
 - [ ] Driving licence field extraction
 - [ ] Admin review queue / UI (individual reviewer accounts)
-- [ ] Face match + liveness (pluggable providers)
+- [x] Face match: ID portrait vs selfie behind a `FaceProvider` interface (AWS Rekognition, per-tenant threshold)
+- [ ] Liveness
 - [ ] Per-tenant retention, evidence export, NFC chip SDK, billing
 - [ ] SDK / embeddable upload widget, retention job, webhook retries
 
@@ -56,7 +57,7 @@ Decisions are conservative:
 
 - The only automatic outcome is `APPROVED`, and only if the tenant has **auto-approve** on (default off; `pnpm tenant:create "name" [webhookUrl] --auto-approve`) *and* every check passed with no issue at all: MRZ found, all check digits valid, no OCR repair, surname, given names and date of birth all matching, not expired. Supplying no expected identity, or any mismatch, never auto-approves.
 - Nothing is rejected automatically. Everything else, including unreadable images, missing `ID_BACK`, a missing OCR engine and repeated pipeline failures, goes to `NEEDS_REVIEW`.
-- Face match is not implemented yet, so with auto-approve on, "approved" currently means "the ID document checks passed", not "the selfie matches". Leave it off until face matching ships.
+- Auto-approval also needs a **face match**: the portrait on `ID_FRONT` compared with the `SELFIE` must reach the tenant's threshold. If face matching is not configured, unavailable, finds no face or scores below the threshold, the session goes to review. Liveness (is the selfie a live person?) is not implemented yet, so a held-up photo of a photo is not detected; keep that in mind before enabling auto-approve.
 
 `verification` (in `GET /v1/sessions/:id` and the webhook) holds flags and issue codes only, never names, dates or numbers read from the card:
 
@@ -64,10 +65,12 @@ Decisions are conservative:
 { "decision": "NEEDS_REVIEW", "autoDecided": false,
   "mrz": { "found": true, "valid": true, "repaired": false },
   "identity": { "surname": "match", "givenNames": "match", "birthDate": "mismatch" },
-  "expired": false, "checks": [{ "field": "documentNumber", "ok": true }], "issues": ["BIRTH_DATE_MISMATCH"] }
+  "expired": false, "face": { "status": "match", "similarity": 96.3 }, "checks": [{ "field": "documentNumber", "ok": true }], "issues": ["BIRTH_DATE_MISMATCH"] }
 ```
 
 Issue codes are the MRZ parser's (`CHECK_DIGIT_MISMATCH`, `OPTIONAL_DATA_PRESENT`, `OCR_REPAIRED`, ...) plus `ID_BACK_MISSING`, `MRZ_NOT_FOUND`, `SURNAME_MISMATCH`, `GIVEN_NAMES_MISMATCH`, `BIRTH_DATE_MISMATCH`, `EXPECTED_IDENTITY_MISSING`, `DOCUMENT_EXPIRED`, `OCR_UNAVAILABLE`, `PIPELINE_ERROR`.
+
+**Face match.** `FACE_PROVIDER=rekognition` (with `AWS_REGION`, e.g. `eu-central-1`) sends the `ID_FRONT` and `SELFIE` bytes to AWS Rekognition `CompareFaces`; it is off by default (`none`), so no image leaves the host unless you opt in. Credentials come from the SDK's default chain: environment variables locally, an IAM role in production. A minimal IAM policy allows `rekognition:CompareFaces` only. The tenant threshold (default 90, `pnpm tenant:create … --face-threshold=92`) is applied by the service, not by AWS. Results hold the similarity score and status (`match`, `below_threshold`, `no_face`, `unusable_image`); no face data or images are stored. Extra issue codes: `FACE_BELOW_THRESHOLD`, `FACE_NOT_DETECTED`, `FACE_IMAGE_UNUSABLE`, `FACE_UNAVAILABLE`. The Rekognition 5 MB image limit is enforced before calling AWS (larger images go to review as `FACE_IMAGE_UNUSABLE`); WebP is not supported by Rekognition and is treated the same way.
 
 OCR needs the `tesseract` binary on the host (`brew install tesseract` / `apt install tesseract-ocr`). Accuracy on real cards has not been tuned yet; see the PR notes.
 
