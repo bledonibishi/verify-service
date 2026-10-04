@@ -56,7 +56,14 @@ export class UsageController {
   @Get('events')
   async events(@CurrentTenant() tenant: Tenant, @Query('month') raw?: string, @Query('cursor') cursor?: string) {
     const month = monthOrThrow(raw);
-    if (cursor !== undefined && !/^[0-9a-f-]{36}$/.test(cursor)) throw new BadRequestException('Invalid cursor');
+    if (cursor !== undefined) {
+      // A cursor is only meaningful for the tenant and month it came from; anything else would
+      // silently return a short or empty page
+      const known = /^[0-9a-f-]{36}$/.test(cursor)
+        ? await this.prisma.usageEvent.findFirst({ where: { id: cursor, tenantId: tenant.id, occurredAt: { gte: month.from, lt: month.to } }, select: { id: true } })
+        : null;
+      if (!known) throw new BadRequestException('Invalid cursor');
+    }
     const rows = await this.prisma.usageEvent.findMany({
       where: { tenantId: tenant.id, occurredAt: { gte: month.from, lt: month.to } },
       orderBy: [{ occurredAt: 'asc' }, { id: 'asc' }],

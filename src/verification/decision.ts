@@ -33,6 +33,11 @@ export interface CheckOutcome {
   expired: boolean | null;
   checks: { field: string; ok: boolean }[];
   issueCodes: string[];
+  /**
+   * Providers that are configured but failed (`face_unavailable`, `liveness_unavailable`). A provider
+   * that is deliberately switched off is not an outage. Used by metering: our failures are not billed.
+   */
+  outages?: string[];
 }
 
 export type Decision = 'APPROVED' | 'NEEDS_REVIEW';

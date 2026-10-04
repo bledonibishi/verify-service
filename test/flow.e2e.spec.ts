@@ -48,8 +48,11 @@ const goodFace = async (): Promise<FaceComparison> => ({ status: 'compared', sim
 let faceImpl: () => Promise<FaceComparison> = goodFace;
 let faceCalls = 0;
 let lastSelfie: Buffer | undefined;
+let faceName = 'fake-face';
 const fakeFace: FaceProvider = {
-  name: 'fake-face',
+  get name() {
+    return faceName;
+  },
   compare: async (_id, selfie) => {
     faceCalls++;
     lastSelfie = selfie;
@@ -62,8 +65,11 @@ let liveImpl: () => Promise<LivenessResult> = goodLive;
 let liveCalls = 0;
 let sessionCounter = 0;
 let createImpl: () => Promise<{ providerSessionId: string }> = async () => ({ providerSessionId: `live-${++sessionCounter}` });
+let liveName = 'fake-live';
 const fakeLiveness: LivenessProvider = {
-  name: 'fake-live',
+  get name() {
+    return liveName;
+  },
   createSession: () => createImpl(),
   getResult: async () => {
     liveCalls++;
@@ -2317,6 +2323,8 @@ describe('verification flow (e2e)', () => {
       faceImpl = goodFace;
       liveImpl = goodLive;
       licenceImpl = async () => ({ text: licenceText() });
+      faceName = 'fake-face';
+      liveName = 'fake-live';
     });
 
     /** Runs a verification to completion for a tenant. */
@@ -2370,6 +2378,34 @@ describe('verification flow (e2e)', () => {
           expect((await eventsOf(noEngine))[0]).toMatchObject({ billable: false, nonBillableReason: 'ocr_unavailable' });
           const u = (await request(http()).get('/v1/usage').set(t.h).expect(200)).body;
           expect(u.verifications).toMatchObject({ billable: 0, nonBillable: 2, net: 0, nonBillableByReason: { pipeline_error: 1, ocr_unavailable: 1 } });
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('does not bill a face-match or liveness outage, but does bill a provider that is deliberately off', async () => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+        try {
+          const t = await mk('outages');
+          faceImpl = async () => { throw new FaceUnavailableError('credentials rejected'); };
+          expect((await eventsOf(await completed(t, 'face-down')))[0]).toMatchObject({ billable: false, nonBillableReason: 'face_unavailable' });
+          faceImpl = goodFace;
+          liveImpl = async () => { throw new LivenessUnavailableError('provider down'); };
+          expect((await eventsOf(await completed(t, 'live-down')))[0]).toMatchObject({ billable: false, nonBillableReason: 'liveness_unavailable' });
+          liveImpl = goodLive;
+
+          // "none" means the tenant chose not to have it: nothing failed, so it is billed like any other verification
+          faceName = 'none';
+          faceImpl = async () => { throw new FaceUnavailableError('face matching is not configured'); };
+          expect((await eventsOf(await completed(t, 'face-off')))[0]).toMatchObject({ billable: true, nonBillableReason: null, face: false });
+          faceName = 'fake-face';
+          faceImpl = goodFace;
+          liveName = 'none';
+          liveImpl = async () => { throw new LivenessUnavailableError('liveness is not configured'); };
+          expect((await eventsOf(await completed(t, 'live-off')))[0]).toMatchObject({ billable: true, liveness: false });
+
+          const u = (await request(http()).get('/v1/usage').set(t.h).expect(200)).body;
+          expect(u.verifications).toMatchObject({ billable: 2, nonBillable: 2, nonBillableByReason: { face_unavailable: 1, liveness_unavailable: 1 } });
         } finally {
           warn.mockRestore();
         }
@@ -2475,6 +2511,25 @@ describe('verification flow (e2e)', () => {
         expect(res.verifications).toMatchObject({ billable: 5, adjustments: -1, net: 4 });
         const events = (await request(http()).get('/v1/usage/events?month=2025-03').set(t.h).expect(200)).body.items;
         expect(events.filter((e: { kind: string }) => e.kind === 'adjustment').map((e: { note: string }) => e.note).sort()).toEqual(['credit for a disputed batch', 'missed one']);
+      });
+
+      it('accepts a cursor only for the tenant and month it came from', async () => {
+        const a = await mk('cursor-a');
+        const b = await mk('cursor-b');
+        const mkEvents = (t: U, y: number, mo: number, n: number) =>
+          prisma.usageEvent.createMany({ data: Array.from({ length: n }, (_, i) => ({ tenantId: t.id, kind: 'verification', sessionId: randomUUID(), occurredAt: new Date(Date.UTC(y, mo, 1, 0, 0, i)) })) });
+        await mkEvents(a, 2025, 0, 105); // January: two pages
+        await mkEvents(a, 2025, 1, 3); // February
+        await mkEvents(b, 2025, 0, 3);
+        const jan = (await request(http()).get('/v1/usage/events?month=2025-01').set(a.h).expect(200)).body;
+        const cursor = jan.nextCursor as string;
+        expect(cursor).toBeTruthy();
+        // The same cursor against another month, or from another tenant, is refused instead of returning a short page
+        await request(http()).get(`/v1/usage/events?month=2025-02&cursor=${cursor}`).set(a.h).expect(400);
+        await request(http()).get(`/v1/usage/events?month=2025-01&cursor=${cursor}`).set(b.h).expect(400);
+        await request(http()).get(`/v1/usage/events?cursor=${cursor}`).set(a.h).expect(400); // current month
+        await request(http()).get(`/v1/usage/events?month=2025-01&cursor=${randomUUID()}`).set(a.h).expect(400); // unknown id
+        await request(http()).get(`/v1/usage/events?month=2025-01&cursor=${cursor}`).set(a.h).expect(200); // the right one still works
       });
 
       it('pages through the events, oldest first, 100 at a time', async () => {

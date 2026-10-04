@@ -17,16 +17,20 @@ export class UsageService {
    * (waiting for photos, or being processed), which are about to cost money. Our own failures do not count.
    */
   async committed(db: Tx | PrismaService, tenantId: string, month: Month, now = new Date()): Promise<number> {
-    const [billable, open] = await Promise.all([
-      db.usageEvent.aggregate({
-        where: { tenantId, kind: 'verification', billable: true, occurredAt: { gte: month.from, lt: month.to } },
-        _sum: { quantity: true },
-      }),
-      db.session.count({
-        where: { tenantId, OR: [{ status: 'PROCESSING' }, { status: 'PENDING', expiresAt: { gt: now } }] },
-      }),
-    ]);
-    return (billable._sum.quantity ?? 0) + open;
+    // One statement, so both counts come from the same snapshot. Read separately, a verification
+    // completing between the two reads (leaving PROCESSING and gaining its usage event in one
+    // transaction) would be missed by both and let a session slip past the cap.
+    const rows = await db.$queryRaw<{ used: bigint }[]>(Prisma.sql`
+      SELECT
+        (SELECT COALESCE(SUM(quantity), 0) FROM usage_events
+          WHERE tenant_id = ${tenantId} AND kind = 'verification' AND billable
+            AND occurred_at >= ${month.from} AND occurred_at < ${month.to})
+        +
+        (SELECT COUNT(*) FROM sessions
+          WHERE tenant_id = ${tenantId}
+            AND (status = 'PROCESSING' OR (status = 'PENDING' AND expires_at > ${now})))
+        AS used`);
+    return Number(rows[0].used);
   }
 
   /**
