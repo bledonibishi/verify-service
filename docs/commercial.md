@@ -109,11 +109,11 @@ Amounts are integer cents. Unit prices are copied onto invoice lines. Rounding: 
 - Pricing in EUR only; tenants billed in other currencies are out of scope.
 - If a merchant of record is chosen later, it may want to own the subscription state; metering must stay the source of truth for usage regardless.
 
-## Open decisions
+## Decisions (owner, 2026-10-05)
 
-1. **Billable unit**: every completed verification except our own failures (recommended), only approved ones, or every submitted session.
-2. **Pricing shape**: subscription tiers with included volume (recommended), pure pay-as-you-go, or prepaid credits.
-3. **How money is collected first**: invoice and bank transfer (recommended), a merchant of record, or a company abroad.
-4. **What to build next**: M1 only (metering, usage API, report, caps), or M1 and M2 (plans and invoices).
+1. **Billable unit**: every completed verification except our own failures. Pass or fail is billed; never submitted, expired and pipeline-gave-up sessions are not.
+2. **Pricing shape**: subscription tiers with included volume, extras per verification, add-ons for face match, liveness and licence.
+3. **Collecting money first**: invoice and bank transfer. No payment processor is integrated.
+4. **Scope now**: **M1 only**: metering, usage API, operator report and per-tenant caps. No prices, plans or invoices yet (M2), no payment collection (M3).
 
-Implementation starts only after these are answered.
+Still open for later: the numbers (depend on AWS costs and what customers will pay), VAT treatment (accountant), and whether a merchant of record is ever needed (needs a direct answer from the provider about Kosovo sellers).
