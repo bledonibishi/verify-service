@@ -16,6 +16,7 @@ Step 1 of the roadmap is in place: tenants, sessions, encrypted uploads, signed 
 - [x] Face match: ID portrait vs selfie behind a `FaceProvider` interface (AWS Rekognition, per-tenant threshold)
 - [x] Liveness provider layer: `LivenessProvider` interface, challenge endpoint, per-tenant minimum confidence, required for auto-approve (AWS adapter + browser widget come with the upload page)
 - [x] Per-tenant retention, data-subject deletion and evidence export (see [docs/retention.md](docs/retention.md))
+- [x] S3-compatible storage adapter (eu-central-1, server-side encryption on top of ours), `pnpm storage:check`
 - [ ] NFC chip SDK, billing
 - [x] Webhook outbox with retries, backoff and replay
 - [ ] SDK / embeddable upload widget
@@ -120,7 +121,7 @@ Each tenant has its own retention windows: documents are deleted 30 days after t
 
 ## Security notes
 
-- Documents are encrypted with AES-256-GCM before they are written to storage; the key comes from `STORAGE_ENCRYPTION_KEY`.
+- Documents are encrypted with AES-256-GCM before they are written to storage (local disk for development, S3 for production, see [docs/storage.md](docs/storage.md)); the key comes from `STORAGE_ENCRYPTION_KEY`.
 - Upload tokens and API keys are stored only as SHA-256 hashes.
 - File types are detected from magic bytes, not the client's content-type.
 - Never commit `.env`; `.env.example` documents every variable.

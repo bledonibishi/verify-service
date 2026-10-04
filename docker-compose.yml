@@ -10,5 +10,13 @@ services:
     volumes:
       - dbdata:/var/lib/postgresql/data
 
+  # Local S3-compatible server for storage tests: never real AWS. API on http://localhost:9100.
+  s3mock:
+    image: adobe/s3mock:latest
+    environment:
+      COM_ADOBE_TESTING_S3MOCK_STORE_REGION: eu-central-1
+    ports:
+      - "9100:9090"
+
 volumes:
   dbdata:
