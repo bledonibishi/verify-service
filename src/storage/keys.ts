@@ -18,8 +18,12 @@ export interface KeyProvider {
   seal(plaintext: Buffer, ctx: SealContext): Promise<Buffer>;
   /** Reads every format this deployment can still read, including older ones. */
   open(sealed: Buffer, ctx: SealContext): Promise<Buffer>;
-  /** True when the object is already in the format new writes use. */
-  isCurrent(sealed: Buffer): boolean;
+  /**
+   * True only when the object is in the format new writes use **and actually opens that way**. The
+   * first bytes alone are not proof: an original-format object has a random IV that can begin with
+   * a format marker by chance.
+   */
+  isCurrent(sealed: Buffer, ctx: SealContext): Promise<boolean>;
 }
 
 /** The key service refused, throttled or could not be reached. Retrying later may work; the data is not damaged. */
@@ -79,10 +83,9 @@ export class EnvKeyProvider implements KeyProvider {
     return Buffer.concat([V0, iv, tag, body]);
   }
 
-  async open(sealed: Buffer, ctx: SealContext): Promise<Buffer> {
-    const f = formatOf(sealed);
-    if (f === 'kms-v1') throw new Error('This object is encrypted with KMS; set STORAGE_KEY_PROVIDER=kms to read it');
-    if (f === 'legacy') return this.openLegacy(sealed);
+  /** Opens the current (VSE0) format only. */
+  openStrict(sealed: Buffer, ctx: SealContext): Buffer {
+    if (formatOf(sealed) !== 'env-v0' || sealed.length < 4 + IV + TAG) throw new StoredObjectCorruptError();
     const b = sealed.subarray(4);
     return gcmDecrypt(this.key, b.subarray(0, IV), b.subarray(IV, IV + TAG), b.subarray(IV + TAG), ctx.aad);
   }
@@ -96,8 +99,36 @@ export class EnvKeyProvider implements KeyProvider {
     }
   }
 
-  isCurrent(sealed: Buffer): boolean {
-    return formatOf(sealed) === 'env-v0';
+  async open(sealed: Buffer, ctx: SealContext): Promise<Buffer> {
+    const f = formatOf(sealed);
+    if (f === 'kms-v1') {
+      // An original-format object can begin with any four bytes, including this marker
+      try {
+        return this.openLegacy(sealed);
+      } catch {
+        throw new Error('This object is encrypted with KMS; set STORAGE_KEY_PROVIDER=kms to read it');
+      }
+    }
+    if (f === 'legacy') return this.openLegacy(sealed);
+    try {
+      return this.openStrict(sealed, ctx);
+    } catch (err) {
+      // ...or an original-format object whose random IV happens to start with "VSE0"
+      try {
+        return this.openLegacy(sealed);
+      } catch {
+        throw err;
+      }
+    }
+  }
+
+  async isCurrent(sealed: Buffer, ctx: SealContext): Promise<boolean> {
+    try {
+      this.openStrict(sealed, ctx);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -106,7 +137,12 @@ type Kms = Pick<KMSClient, 'send'>;
 export interface KmsOptions {
   /** Key id, ARN or alias of the symmetric KMS key. */
   keyId: string;
-  /** How long an unwrapped data key may stay in memory, in seconds. 0 turns the cache off. */
+  /**
+   * How long an unwrapped data key may stay in memory, in seconds. **0 (the default) turns the cache
+   * off**, which is what makes revocation immediate and puts one KMS Decrypt event in the audit log
+   * for every read. A positive value trades both for fewer KMS calls: keys read within that time are
+   * served from memory, so revoking access takes up to that long to bite, and those reads are not logged.
+   */
   cacheSeconds?: number;
   maxCached?: number;
   /** The master key, only so objects written before KMS was switched on can still be read (and re-encrypted). */
@@ -140,7 +176,7 @@ export class KmsKeyProvider implements KeyProvider {
     private readonly opts: KmsOptions,
   ) {
     if (!opts.keyId) throw new Error('KMS_KEY_ID is required when STORAGE_KEY_PROVIDER=kms');
-    this.ttlMs = Math.max(0, opts.cacheSeconds ?? 60) * 1000;
+    this.ttlMs = Math.max(0, opts.cacheSeconds ?? 0) * 1000;
     this.max = opts.maxCached ?? 200;
     this.now = opts.now ?? Date.now;
   }
@@ -177,9 +213,9 @@ export class KmsKeyProvider implements KeyProvider {
   async open(sealed: Buffer, ctx: SealContext): Promise<Buffer> {
     if (formatOf(sealed) === 'kms-v1') {
       try {
-        return await this.openEnvelope(sealed, ctx);
+        return await this.openStrict(sealed, ctx);
       } catch (err) {
-        // A master-key object that happens to start with the same four bytes (1 in 4 billion)
+        // A master-key object whose random IV happens to start with the same four bytes (1 in 4 billion)
         if (!this.opts.legacy) throw err;
         try {
           return this.opts.legacy.openLegacy(sealed);
@@ -194,8 +230,9 @@ export class KmsKeyProvider implements KeyProvider {
     return this.opts.legacy.open(sealed, ctx);
   }
 
-  private async openEnvelope(sealed: Buffer, ctx: SealContext): Promise<Buffer> {
-    const wrappedLen = sealed.length >= 6 ? sealed.readUInt16BE(4) : 0;
+  /** Opens the KMS format only. The data key's lifetime belongs to this call: it is zeroed afterwards. */
+  async openStrict(sealed: Buffer, ctx: SealContext): Promise<Buffer> {
+    const wrappedLen = sealed.length >= 6 && formatOf(sealed) === 'kms-v1' ? sealed.readUInt16BE(4) : 0;
     const start = 6 + wrappedLen;
     if (wrappedLen === 0 || sealed.length < start + IV + TAG) throw new StoredObjectCorruptError();
     const wrapped = sealed.subarray(6, start);
@@ -203,15 +240,23 @@ export class KmsKeyProvider implements KeyProvider {
     const tag = sealed.subarray(start + IV, start + IV + TAG);
     const body = sealed.subarray(start + IV + TAG);
     const dek = await this.unwrap(wrapped, ctx);
-    return gcmDecrypt(dek, iv, tag, body, ctx.aad);
+    try {
+      return gcmDecrypt(dek, iv, tag, body, ctx.aad);
+    } finally {
+      dek.fill(0);
+    }
   }
 
-  /** Unwraps a data key, remembering it briefly (the pipeline reads the same document several times). */
+  /**
+   * Unwraps a data key and hands the caller **its own copy** (to be zeroed after use). With the
+   * cache on, a separate copy is what is remembered, so an expiry or eviction can never zero a key
+   * another read is in the middle of using.
+   */
   private async unwrap(wrapped: Buffer, ctx: SealContext): Promise<Buffer> {
     // The context is part of the cache key: a hit can never serve a key for a different tenant or session
     const id = createHash('sha256').update(wrapped).update('\0').update(JSON.stringify(Object.entries(ctx.kmsContext).sort())).digest('hex');
     const hit = this.cache.get(id);
-    if (hit && hit.expires > this.now()) return hit.key;
+    if (hit && hit.expires > this.now()) return Buffer.from(hit.key);
     if (hit) this.drop(id);
 
     const res = await this.call(() =>
@@ -222,7 +267,7 @@ export class KmsKeyProvider implements KeyProvider {
     res.Plaintext.fill(0);
     if (this.ttlMs > 0) {
       if (this.cache.size >= this.max) this.drop(this.cache.keys().next().value as string); // oldest first
-      this.cache.set(id, { key, expires: this.now() + this.ttlMs });
+      this.cache.set(id, { key: Buffer.from(key), expires: this.now() + this.ttlMs });
     }
     return key;
   }
@@ -237,7 +282,14 @@ export class KmsKeyProvider implements KeyProvider {
     for (const id of [...this.cache.keys()]) this.drop(id);
   }
 
-  isCurrent(sealed: Buffer): boolean {
-    return formatOf(sealed) === 'kms-v1';
+  async isCurrent(sealed: Buffer, ctx: SealContext): Promise<boolean> {
+    try {
+      (await this.openStrict(sealed, ctx)).fill(0);
+      return true;
+    } catch (err) {
+      // Not being able to reach KMS says nothing about the object: let the caller see that
+      if (err instanceof KeyUnavailableError) throw err;
+      return false;
+    }
   }
 }

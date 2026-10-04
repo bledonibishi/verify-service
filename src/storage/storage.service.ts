@@ -64,17 +64,29 @@ export class StorageService implements DocumentStorage {
     if (!keyId) throw new Error('KMS_KEY_ID is required when STORAGE_KEY_PROVIDER=kms');
     const region = config.get<string>('KMS_REGION') || config.get<string>('S3_REGION') || config.get<string>('AWS_REGION');
     if (!region) throw new Error('KMS_REGION is required when STORAGE_KEY_PROVIDER=kms');
-    // Dedicated KMS_* keys, else the storage user's S3_* keys (give that user the KMS permissions), else a role
-    const id = config.get<string>('KMS_ACCESS_KEY_ID') || config.get<string>('S3_ACCESS_KEY_ID');
-    const secret = config.get<string>('KMS_SECRET_ACCESS_KEY') || config.get<string>('S3_SECRET_ACCESS_KEY');
-    if (!!id !== !!secret) throw new Error('Set both access key id and secret for KMS (KMS_* or S3_*), or neither');
+    // Dedicated KMS_* keys if either is set (then both are required and used alone), else the storage
+    // user's S3_* pair (both or neither), else a role. Fields are never mixed between the two.
+    const kmsId = config.get<string>('KMS_ACCESS_KEY_ID');
+    const kmsSecret = config.get<string>('KMS_SECRET_ACCESS_KEY');
+    const s3Id = config.get<string>('S3_ACCESS_KEY_ID');
+    const s3Secret = config.get<string>('S3_SECRET_ACCESS_KEY');
+    let id: string | undefined;
+    let secret: string | undefined;
+    if (kmsId || kmsSecret) {
+      if (!kmsId || !kmsSecret) throw new Error('Set both KMS_ACCESS_KEY_ID and KMS_SECRET_ACCESS_KEY, or neither');
+      [id, secret] = [kmsId, kmsSecret];
+    } else if (s3Id || s3Secret) {
+      if (!s3Id || !s3Secret) throw new Error('Set both S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY, or neither');
+      [id, secret] = [s3Id, s3Secret];
+    }
     if (!id && config.get<string>('AWS_ACCESS_KEY_ID')) {
       throw new Error('AWS_ACCESS_KEY_ID is set (used by face matching) but no KMS_ACCESS_KEY_ID or S3_ACCESS_KEY_ID: set dedicated keys for encryption, or run under an IAM role without AWS_ACCESS_KEY_ID in its environment');
     }
     const cache = parseInt(config.get<string>('KMS_DEK_CACHE_SECONDS') ?? '', 10);
     return new KmsKeyProvider(new KMSClient({ region, ...(id && secret ? { credentials: { accessKeyId: id, secretAccessKey: secret } } : {}) }), {
       keyId,
-      cacheSeconds: Number.isFinite(cache) && cache >= 0 ? cache : 60,
+      // Off unless asked for: see KmsOptions.cacheSeconds for what a cache costs in revocation and audit
+      cacheSeconds: Number.isFinite(cache) && cache >= 0 ? cache : 0,
       // Only to read (and re-encrypt) objects written before KMS was switched on
       legacy: this.masterKey(config, false),
     });
@@ -134,7 +146,8 @@ export class StorageService implements DocumentStorage {
   /** Without changing anything: is this object missing, already current, or in an older format? */
   async inspect(key: string): Promise<'missing' | 'current' | 'stale'> {
     try {
-      return this.keys.isCurrent(await this.store.get(key)) ? 'current' : 'stale';
+      const raw = await this.store.get(key);
+      return (await this.keys.isCurrent(raw, sealContext(key))) ? 'current' : 'stale';
     } catch (err) {
       if (err instanceof StoredObjectMissingError) return 'missing';
       throw err;
@@ -154,7 +167,7 @@ export class StorageService implements DocumentStorage {
       if (err instanceof StoredObjectMissingError) return 'missing';
       throw err;
     }
-    if (this.keys.isCurrent(raw)) return 'current';
+    if (await this.keys.isCurrent(raw, sealContext(key))) return 'current';
     const plaintext = await this.keys.open(raw, sealContext(key));
     await this.store.put(key, await this.keys.seal(plaintext, sealContext(key)));
     return 'rewrapped';

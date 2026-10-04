@@ -5,7 +5,7 @@ import { Test } from '@nestjs/testing';
 import { PrismaClient } from '@prisma/client';
 import { randomBytes, randomUUID } from 'crypto';
 import { createServer, Server } from 'http';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { AddressInfo } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -2760,6 +2760,63 @@ describe('verification flow (e2e)', () => {
         expect(await prisma.session.count({ where: { id } })).toBe(0);
         expect(files(id)).toEqual([]); // no resurrected ciphertext
       }
+    });
+
+    it('does not stop early when the document it just finished is erased before the next page', async () => {
+      const storage = app.get(StorageService);
+      const masterKey = Buffer.from(process.env.STORAGE_ENCRYPTION_KEY!, 'base64');
+      const ids = [await session('page-1'), await session('page-2'), await session('page-3')];
+      const all = (await Promise.all(ids.map((id) => docs(id)))).flat().sort((a, b) => (a.id < b.id ? -1 : 1));
+      for (const d of all) writeFileSync(join(storageDir, d.storageKey), legacyEncrypt(masterKey, await storage.get(d.storageKey)));
+      // After the first page (one document) is read, erase that very document: a cursor on it would then return nothing
+      const real = prisma.document.findMany.bind(prisma.document);
+      let calls = 0;
+      const spy = jest.spyOn(prisma.document, 'findMany').mockImplementation(((args: unknown) => {
+        const page = real(args as never);
+        if (++calls === 1) return page.then(async (rows: { id: string; sessionId: string }[]) => {
+          await prisma.document.delete({ where: { id: rows[rows.length - 1].id } });
+          return rows;
+        });
+        return page;
+      }) as never);
+      try {
+        const report = await reencryptAll(prisma, storage, { tenantId: t.id, batch: 1 });
+        expect(report.failed).toBe(0);
+        const remaining = all.slice(1);
+        expect(remaining.length).toBeGreaterThanOrEqual(5);
+        for (const d of remaining) expect(readFileSync(join(storageDir, d.storageKey)).subarray(0, 4).toString()).toBe('VSE0'); // none skipped
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it('rewrites the document\'s current file, not a stale one, when an upload replaces it mid-run', async () => {
+      const storage = app.get(StorageService);
+      const masterKey = Buffer.from(process.env.STORAGE_ENCRYPTION_KEY!, 'base64');
+      const id = await session('replaced');
+      const [doc] = await docs(id);
+      const oldPath = join(storageDir, doc.storageKey);
+      writeFileSync(oldPath, legacyEncrypt(masterKey, await storage.get(doc.storageKey)));
+      const newKey = `${t.id}/${id}/replacement-${suffix}`;
+      const real = prisma.document.findMany.bind(prisma.document);
+      const spy = jest.spyOn(prisma.document, 'findMany').mockImplementation(((args: unknown) =>
+        real(args as never).then(async (rows: { id: string }[]) => {
+          if (rows.some((r) => r.id === doc.id) && !existsSync(join(storageDir, newKey))) {
+            // A replacement upload: new file under a new key, the row points at it, the old file is deleted
+            writeFileSync(join(storageDir, newKey), legacyEncrypt(masterKey, Buffer.from('replacement photo')));
+            await prisma.document.update({ where: { id: doc.id }, data: { storageKey: newKey } });
+            rmSync(oldPath);
+          }
+          return rows;
+        })) as never);
+      try {
+        const report = await reencryptAll(prisma, storage, { tenantId: t.id });
+        expect(report.failed).toBe(0);
+      } finally {
+        spy.mockRestore();
+      }
+      expect(existsSync(oldPath)).toBe(false); // the displaced file was not written back
+      expect(readFileSync(join(storageDir, newKey)).subarray(0, 4).toString()).toBe('VSE0'); // the live one was re-encrypted
     });
 
     it('counts a document it cannot re-encrypt as failed, leaves it as it was, and carries on', async () => {

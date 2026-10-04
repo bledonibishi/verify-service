@@ -17,7 +17,7 @@ import { StorageService, sealContext } from './storage.service';
 function fakeKms(keyId = 'arn:aws:kms:eu-central-1:111122223333:key/test') {
   const master = randomBytes(32);
   const log: { op: 'generate' | 'decrypt'; context: Record<string, string>; keyId?: string }[] = [];
-  const state: { fail?: string; issuedKeys: Buffer[] } = { issuedKeys: [] };
+  const state: { fail?: string; issuedKeys: Buffer[]; returned: Uint8Array[] } = { issuedKeys: [], returned: [] };
   const aadOf = (c: Record<string, string> | undefined) => Buffer.from(JSON.stringify(Object.entries(c ?? {}).sort()));
   const client = {
     send: async (cmd: unknown) => {
@@ -31,7 +31,9 @@ function fakeKms(keyId = 'arn:aws:kms:eu-central-1:111122223333:key/test') {
         const c = createCipheriv('aes-256-gcm', master, iv);
         c.setAAD(aadOf(input.EncryptionContext as Record<string, string>));
         const blob = Buffer.concat([iv, c.update(dek), c.final(), c.getAuthTag()]);
-        return { Plaintext: new Uint8Array(dek), CiphertextBlob: new Uint8Array(blob) };
+        const out = new Uint8Array(dek);
+        state.returned.push(out);
+        return { Plaintext: out, CiphertextBlob: new Uint8Array(blob) };
       }
       if (cmd instanceof DecryptCommand) {
         const input = cmd.input;
@@ -43,7 +45,9 @@ function fakeKms(keyId = 'arn:aws:kms:eu-central-1:111122223333:key/test') {
           d.setAAD(aadOf(input.EncryptionContext as Record<string, string>));
           d.setAuthTag(blob.subarray(blob.length - 16));
           const dek = Buffer.concat([d.update(blob.subarray(12, blob.length - 16)), d.final()]);
-          return { Plaintext: new Uint8Array(dek) };
+          const out = new Uint8Array(dek);
+          state.returned.push(out);
+          return { Plaintext: out };
         } catch {
           throw Object.assign(new Error('invalid'), { name: 'InvalidCiphertextException' });
         }
@@ -174,6 +178,66 @@ describe('KmsKeyProvider', () => {
     expect(JSON.stringify(err) + err.message).not.toContain('tenant-1');
   });
 
+  describe('no cache by default: revocation is immediate and every read is audited', () => {
+    it('asks KMS on every read, and a revoked key stops reads at once', async () => {
+      const { kms, provider } = make(); // default settings
+      const sealed = await provider.seal(secret, ctx());
+      for (let i = 0; i < 3; i++) await provider.open(sealed, ctx());
+      expect(kms.log.filter((l) => l.op === 'decrypt')).toHaveLength(3); // one audit event per read
+      kms.state.fail = 'AccessDeniedException'; // access revoked
+      await expect(provider.open(sealed, ctx())).rejects.toBeInstanceOf(KeyUnavailableError);
+    });
+
+    it('with an opt-in cache, reads continue for that long after revocation (and are not logged), then stop', async () => {
+      let t = 1_000_000;
+      const { kms, provider } = make({ cacheSeconds: 30, now: () => t });
+      const sealed = await provider.seal(secret, ctx());
+      await provider.open(sealed, ctx());
+      kms.state.fail = 'AccessDeniedException';
+      expect(await provider.open(sealed, ctx())).toEqual(secret); // the documented cost of caching
+      expect(kms.log.filter((l) => l.op === 'decrypt')).toHaveLength(1);
+      t += 31_000;
+      await expect(provider.open(sealed, ctx())).rejects.toBeInstanceOf(KeyUnavailableError);
+    });
+
+    it('is off unless KMS_DEK_CACHE_SECONDS says otherwise', () => {
+      const config = (v: Record<string, string>) => ({ get: (k: string) => v[k] }) as unknown as ConfigService;
+      const base = { STORAGE_KEY_PROVIDER: 'kms', KMS_KEY_ID: 'alias/x', KMS_REGION: 'eu-central-1' };
+      const ttl = (extra: Record<string, string>) => (new StorageService(config({ ...base, ...extra })) as unknown as { keys: { ttlMs: number } }).keys.ttlMs;
+      expect(ttl({})).toBe(0);
+      expect(ttl({ KMS_DEK_CACHE_SECONDS: 'abc' })).toBe(0);
+      expect(ttl({ KMS_DEK_CACHE_SECONDS: '-5' })).toBe(0);
+      expect(ttl({ KMS_DEK_CACHE_SECONDS: '45' })).toBe(45_000);
+    });
+  });
+
+  describe('data-key lifetime', () => {
+    it('zeroes the key material it was handed by the service', async () => {
+      const { kms, provider } = make();
+      const sealed = await provider.seal(secret, ctx());
+      await provider.open(sealed, ctx());
+      expect(kms.state.returned.length).toBeGreaterThanOrEqual(2); // generate and decrypt
+      for (const arr of kms.state.returned) expect([...arr].every((b) => b === 0)).toBe(true);
+    });
+
+    it('never lets an eviction or expiry zero a key another read is using', async () => {
+      let t = 1_000_000;
+      const { provider } = make({ cacheSeconds: 1, maxCached: 1, now: () => t });
+      const objs = await Promise.all([1, 2, 3, 4].map((i) => provider.seal(secret, ctx(`t/s/o${i}`))));
+      for (let round = 0; round < 5; round++) {
+        t += round % 2 ? 2000 : 0; // some rounds expire everything mid-flight
+        const reads = await Promise.all(objs.flatMap((o, i) => [provider.open(o, ctx(`t/s/o${i + 1}`)), provider.open(o, ctx(`t/s/o${i + 1}`))]));
+        for (const r of reads) expect(r).toEqual(secret); // before the fix a shared, zeroed key made some of these fail
+      }
+    });
+
+    it('serves a cached key as a copy, so using it never damages the cached one', async () => {
+      const { provider } = make({ cacheSeconds: 60 });
+      const sealed = await provider.seal(secret, ctx());
+      for (let i = 0; i < 4; i++) expect(await provider.open(sealed, ctx())).toEqual(secret);
+    });
+  });
+
   it('needs a key id', () => {
     expect(() => new KmsKeyProvider(fakeKms().client, { keyId: '' })).toThrow('KMS_KEY_ID');
   });
@@ -187,16 +251,49 @@ describe('KmsKeyProvider', () => {
       const { provider } = make({ legacy: legacy() });
       const old = oldObject();
       expect(await provider.open(old, ctx())).toEqual(secret);
-      expect(provider.isCurrent(old)).toBe(false);
-      expect(provider.isCurrent(await provider.seal(secret, ctx()))).toBe(true);
+      expect(await provider.isCurrent(old, ctx())).toBe(false);
+      expect(await provider.isCurrent(await provider.seal(secret, ctx()), ctx())).toBe(true);
       const v0 = await legacy().seal(secret, ctx());
       expect(await provider.open(v0, ctx())).toEqual(secret);
-      expect(provider.isCurrent(v0)).toBe(false);
+      expect(await provider.isCurrent(v0, ctx())).toBe(false);
     });
 
     it('say clearly what is missing when the old key is not supplied', async () => {
       const { provider } = make();
       await expect(provider.open(oldObject(), ctx())).rejects.toThrow('STORAGE_ENCRYPTION_KEY');
+    });
+
+    // An original-format object has a random 12-byte IV, so its first four bytes can equal a marker by chance
+    const craftedLegacy = (marker: string) => {
+      const iv = Buffer.concat([Buffer.from(marker), randomBytes(8)]);
+      const c = createCipheriv('aes-256-gcm', master, iv);
+      const ct = Buffer.concat([c.update(secret), c.final()]);
+      return Buffer.concat([iv, c.getAuthTag(), ct]);
+    };
+
+    it('are never mistaken for current just because their first bytes look like a marker', async () => {
+      const { provider } = make({ legacy: legacy() });
+      const looksKms = craftedLegacy('VSE1');
+      expect(formatOf(looksKms)).toBe('kms-v1');
+      expect(await provider.isCurrent(looksKms, ctx())).toBe(false); // it does not actually open as KMS
+      expect(await provider.open(looksKms, ctx())).toEqual(secret);
+      const env = legacy();
+      const looksV0 = craftedLegacy('VSE0');
+      expect(formatOf(looksV0)).toBe('env-v0');
+      expect(await env.isCurrent(looksV0, ctx())).toBe(false);
+      expect(await env.open(looksV0, ctx())).toEqual(secret);
+      // ...and a damaged object is not "current" either
+      const real = await provider.seal(secret, ctx());
+      const bad = Buffer.from(real);
+      bad[bad.length - 1] ^= 1;
+      expect(await provider.isCurrent(bad, ctx())).toBe(false);
+    });
+
+    it('reports an unreachable key service as an error, not as "stale" or "current"', async () => {
+      const { kms, provider } = make({ legacy: legacy() });
+      const sealed = await provider.seal(secret, ctx());
+      kms.state.fail = 'ThrottlingException';
+      await expect(provider.isCurrent(sealed, ctx())).rejects.toBeInstanceOf(KeyUnavailableError);
     });
 
     it('survive the one-in-four-billion case of starting with the KMS marker', async () => {
@@ -227,7 +324,7 @@ describe('EnvKeyProvider', () => {
   it('still reads the original format, and says what to do with a KMS object', async () => {
     const p = new EnvKeyProvider(key);
     expect(await p.open(legacyEncrypt(key, secret), ctx())).toEqual(secret);
-    expect(p.isCurrent(legacyEncrypt(key, secret))).toBe(false);
+    expect(await p.isCurrent(legacyEncrypt(key, secret), ctx())).toBe(false);
     await expect(p.open(await new KmsKeyProvider(fakeKms().client, { keyId: 'k' }).seal(secret, ctx()), ctx())).rejects.toThrow('STORAGE_KEY_PROVIDER=kms');
   });
 
@@ -318,7 +415,12 @@ describe('storage configuration', () => {
   it.each([
     [{ KMS_KEY_ID: '' }, 'KMS_KEY_ID'],
     [{ KMS_REGION: '' }, 'KMS_REGION'],
-    [{ KMS_ACCESS_KEY_ID: 'only-one' }, 'both access key id and secret'],
+    [{ KMS_ACCESS_KEY_ID: 'only-one' }, 'both KMS_ACCESS_KEY_ID and KMS_SECRET_ACCESS_KEY'],
+    [{ KMS_SECRET_ACCESS_KEY: 'only-secret' }, 'both KMS_ACCESS_KEY_ID and KMS_SECRET_ACCESS_KEY'],
+    // A partial KMS pair is never completed from the S3 pair
+    [{ KMS_ACCESS_KEY_ID: 'kms-id', S3_ACCESS_KEY_ID: 's3-id', S3_SECRET_ACCESS_KEY: 's3-secret' }, 'both KMS_ACCESS_KEY_ID and KMS_SECRET_ACCESS_KEY'],
+    [{ KMS_SECRET_ACCESS_KEY: 'kms-secret', S3_ACCESS_KEY_ID: 's3-id', S3_SECRET_ACCESS_KEY: 's3-secret' }, 'both KMS_ACCESS_KEY_ID and KMS_SECRET_ACCESS_KEY'],
+    [{ S3_ACCESS_KEY_ID: 'only-s3-id' }, 'both S3_ACCESS_KEY_ID and S3_SECRET_ACCESS_KEY'],
     [{ AWS_ACCESS_KEY_ID: 'face-user' }, 'AWS_ACCESS_KEY_ID'],
     [{ STORAGE_KEY_PROVIDER: 'vault' }, 'STORAGE_KEY_PROVIDER'],
     [{ STORAGE_KEY_PROVIDER: 'env', STORAGE_ENCRYPTION_KEY: '' }, 'STORAGE_ENCRYPTION_KEY'],
