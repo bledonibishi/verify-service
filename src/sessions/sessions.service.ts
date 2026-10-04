@@ -38,6 +38,9 @@ export class SessionsService {
       // The token is only ever shown here; only its hash is stored.
       uploadToken: token,
       uploadUrl: `${base}/v1/upload/${token}`,
+      // The hosted capture page. The token sits in the URL fragment, which browsers never send to a
+      // server, so it stays out of access logs and Referer headers.
+      hostedUrl: `${base}/verify#${token}`,
       expiresAt: session.expiresAt,
       status: session.status,
       requireDrivingLicence: session.requireLicence,

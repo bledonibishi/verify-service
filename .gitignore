@@ -13,3 +13,5 @@ coverage/
 # Real ID/licence samples must never be committed
 fixtures/private/
 *.private.*
+
+/sdk/dist/

@@ -16,6 +16,7 @@ import { buildTd1, SAMPLE, Td1Fields } from '../src/documents/mrz/testing';
 import { OCR_PROVIDER, OcrProvider, OcrUnavailableError } from '../src/ocr/ocr-provider';
 import { FACE_PROVIDER, FaceComparison, FaceProvider, FaceUnavailableError } from '../src/face/face-provider';
 import { LIVENESS_PROVIDER, LivenessProvider, LivenessResult, LivenessUnavailableError } from '../src/liveness/liveness-provider';
+import { UploadClient, VerifyApiError, VerifyClient, constructWebhookEvent } from '../sdk/src';
 import { OutboxService } from '../src/webhooks/outbox.service';
 import { WebhookDispatcher } from '../src/webhooks/dispatcher';
 import { RetentionService } from '../src/retention/retention.service';
@@ -2101,6 +2102,198 @@ describe('verification flow (e2e)', () => {
         await prisma.webhookEvent.create({ data: { tenantId: t.id, sessionId: sid, type: 't', body: '{}', status: 'PENDING', nextAttemptAt: new Date(Date.now() + 3600_000) } });
         await request(http()).delete(`/v1/sessions/${sid}`).set(t.h).expect(204);
         expect(await prisma.webhookEvent.count({ where: { sessionId: sid } })).toBe(0);
+      });
+    });
+  });
+
+  describe('hosted page, upload API and client SDK', () => {
+    const http = () => app.getHttpServer();
+    const baseUrl = () => `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
+    const create = async (extra: object = {}) => (await request(http()).post('/v1/sessions').set(auth()).send({ externalRef: `h-${randomToken(4)}`, ...extra }).expect(201)).body;
+
+    describe('the hosted page', () => {
+      it('serves a page with no inline script, a strict CSP and no framing', async () => {
+        const page = await request(http()).get('/verify').expect(200);
+        const csp = page.headers['content-security-policy'];
+        expect(csp).toContain("default-src 'none'");
+        expect(csp).toContain("script-src 'self'");
+        expect(csp).toContain("style-src 'self'");
+        expect(csp).toContain("connect-src 'self'");
+        expect(csp).toContain("frame-ancestors 'none'");
+        expect(csp).not.toContain('unsafe');
+        expect(page.headers['x-frame-options']).toBe('DENY');
+        expect(page.headers['referrer-policy']).toBe('no-referrer');
+        expect(page.headers['cache-control']).toBe('no-store');
+        expect(page.headers['permissions-policy']).toContain('camera=(self)');
+        expect(page.text).not.toMatch(/<script(?![^>]*\bsrc=)/i);
+        expect(page.text).not.toMatch(/\son\w+=|style=/i);
+        const js = await request(http()).get('/verify/app.js').expect(200);
+        expect(js.headers['content-type']).toContain('javascript');
+        expect(js.text).not.toMatch(/innerHTML|outerHTML|document\.write|eval\(/);
+        expect((await request(http()).get('/verify/app.css').expect(200)).headers['content-type']).toContain('text/css');
+      });
+
+      it('lets only configured origins embed it', async () => {
+        const original = process.env.HOSTED_FRAME_ANCESTORS;
+        try {
+          process.env.HOSTED_FRAME_ANCESTORS = 'https://app.example.com https://*.evil.test javascript:alert(1) *';
+          const csp = (await request(http()).get('/verify').expect(200)).headers['content-security-policy'];
+          expect(csp).toContain('frame-ancestors https://app.example.com');
+          expect(csp).not.toMatch(/evil|javascript|\*/);
+          process.env.HOSTED_FRAME_ANCESTORS = '* https://x.test;script-src';
+          const closed = await request(http()).get('/verify').expect(200);
+          expect(closed.headers['content-security-policy']).toContain("frame-ancestors 'none'");
+          expect(closed.headers['content-security-policy']).not.toContain('x.test');
+        } finally {
+          if (original === undefined) delete process.env.HOSTED_FRAME_ANCESTORS;
+          else process.env.HOSTED_FRAME_ANCESTORS = original;
+        }
+      });
+
+      it('hands out a hosted URL whose token is in the fragment, never in the path or query', async () => {
+        const created = await create();
+        expect(created.hostedUrl).toBe(`http://verify.test/verify#${created.uploadToken}`);
+        const [beforeFragment] = (created.hostedUrl as string).split('#');
+        expect(beforeFragment).not.toContain(created.uploadToken);
+      });
+    });
+
+    describe('GET /v1/upload/:token', () => {
+      it('describes what to ask for, without any personal data', async () => {
+        const plain = await create({ externalRef: 'customer-ref-4711', firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' });
+        const res = await request(http()).get(`/v1/upload/${plain.uploadToken}`).expect(200);
+        expect(res.body).toMatchObject({
+          status: 'PENDING',
+          requireDrivingLicence: false,
+          uploaded: [],
+          steps: [
+            { kind: 'ID_FRONT', required: true },
+            { kind: 'ID_BACK', required: false },
+            { kind: 'SELFIE', required: true },
+          ],
+        });
+        expect(typeof res.body.liveness).toBe('boolean');
+        const dump = JSON.stringify(res.body);
+        for (const secret of ['Dema', 'Testi', '1990', 'customer-ref-4711', plain.id]) expect(dump).not.toContain(secret);
+      });
+
+      it('asks for the licence when the session requires one, and shows progress', async () => {
+        const lic = await create({ requireDrivingLicence: true });
+        await request(http()).post(`/v1/upload/${lic.uploadToken}/ID_FRONT`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+        const res = await request(http()).get(`/v1/upload/${lic.uploadToken}`).expect(200);
+        expect(res.body.steps.map((x: { kind: string; required: boolean }) => `${x.kind}:${x.required}`)).toEqual([
+          'ID_FRONT:true', 'ID_BACK:true', 'LICENCE_FRONT:true', 'LICENCE_BACK:false', 'SELFIE:true',
+        ]);
+        expect(res.body.uploaded).toEqual(['ID_FRONT']);
+      });
+
+      it('answers 404 for an unknown token and 410 once the link is used or expired', async () => {
+        await request(http()).get('/v1/upload/not-a-real-token').expect(404);
+        const used = await create();
+        for (const kind of ['ID_FRONT', 'SELFIE']) await request(http()).post(`/v1/upload/${used.uploadToken}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+        await request(http()).post(`/v1/upload/${used.uploadToken}/submit`).expect(200);
+        const submitted = await request(http()).get(`/v1/upload/${used.uploadToken}`).expect(410);
+        // A machine-readable reason, so a client can thank the user instead of calling a used link dead
+        expect(submitted.body).toMatchObject({ statusCode: 410, code: 'session_submitted' });
+        const again = await request(http()).post(`/v1/upload/${used.uploadToken}/submit`).expect(410);
+        expect(again.body.code).toBe('session_submitted');
+        const old = await create();
+        await prisma.session.update({ where: { id: old.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+        const expired = await request(http()).get(`/v1/upload/${old.uploadToken}`).expect(410);
+        expect(expired.body).toMatchObject({ code: 'session_expired', message: 'Session expired' });
+        // Once expiry has been recorded, it is still "expired", not "submitted"
+        const afterRecord = await request(http()).get(`/v1/upload/${old.uploadToken}`).expect(410);
+        expect(afterRecord.body.code).toBe('session_expired');
+        expect((await request(http()).post(`/v1/upload/${old.uploadToken}/SELFIE`).attach('file', PNG, { filename: 'a.png' }).expect(410)).body.code).toBe('session_expired');
+      });
+    });
+
+    describe('CORS', () => {
+      it('lets browsers call the upload endpoints from any origin, without credentials', async () => {
+        const pre = await request(http()).options('/v1/upload/sometoken/ID_FRONT').set('Origin', 'https://shop.example').set('Access-Control-Request-Method', 'POST').expect(204);
+        expect(pre.headers['access-control-allow-origin']).toBe('*');
+        expect(pre.headers['access-control-allow-methods']).toContain('POST');
+        expect(pre.headers['access-control-allow-credentials']).toBeUndefined();
+        const created = await create();
+        const get = await request(http()).get(`/v1/upload/${created.uploadToken}`).set('Origin', 'https://shop.example').expect(200);
+        expect(get.headers['access-control-allow-origin']).toBe('*');
+        const error = await request(http()).get('/v1/upload/unknown').set('Origin', 'https://shop.example').expect(404);
+        expect(error.headers['access-control-allow-origin']).toBe('*'); // so the browser can read the error
+      });
+
+      it('gives nothing else CORS: not the API-key endpoints, not the review API', async () => {
+        for (const path of ['/v1/sessions', '/review/api/me', '/v1/webhook-events']) {
+          const res = await request(http()).options(path).set('Origin', 'https://evil.example').set('Access-Control-Request-Method', 'GET');
+          expect(res.headers['access-control-allow-origin']).toBeUndefined();
+          const get = await request(http()).get(path).set('Origin', 'https://evil.example');
+          expect(get.headers['access-control-allow-origin']).toBeUndefined();
+        }
+      });
+    });
+
+    describe('client SDK against the running service', () => {
+      beforeEach(() => {
+        ocrImpl = async () => ({ text: mrzText() });
+      });
+
+      it('runs the whole flow: create, upload from the browser client, submit, read the result, verify the webhook', async () => {
+        const server = new VerifyClient({ apiKey: apiKey, baseUrl: baseUrl() });
+        const created = await server.sessions.create({ externalRef: `sdk-${randomToken(4)}`, firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' });
+        expect(created).toMatchObject({ status: 'PENDING', requireDrivingLicence: false });
+        expect(created.hostedUrl).toContain('/verify#');
+
+        // The browser side holds only the token
+        const browser = new UploadClient({ baseUrl: baseUrl(), token: created.uploadToken });
+        const info = await browser.getSession();
+        expect(info.steps.map((x) => x.kind)).toEqual(['ID_FRONT', 'ID_BACK', 'SELFIE']);
+        for (const step of info.steps) await browser.upload(step.kind, new Blob([PNG], { type: 'image/png' }));
+        expect((await browser.getSession()).uploaded.sort()).toEqual(['ID_BACK', 'ID_FRONT', 'SELFIE']);
+        await expect(browser.submit()).resolves.toEqual({ status: 'PROCESSING' });
+        // The link is used up
+        await expect(browser.getSession()).rejects.toMatchObject({ status: 410 });
+        await expect(browser.upload('SELFIE', new Blob([PNG]))).rejects.toMatchObject({ status: 410 });
+
+        let session = await server.sessions.get(created.id);
+        for (let i = 0; i < 200 && session.status === 'PROCESSING'; i++) {
+          await new Promise((r) => setTimeout(r, 25));
+          session = await server.sessions.get(created.id);
+        }
+        expect(session.status).toBe('NEEDS_REVIEW');
+        expect(session.verification?.mrz).toMatchObject({ found: true, valid: true });
+        expect(session.verification?.identity).toEqual({ surname: 'match', givenNames: 'match', birthDate: 'match' });
+
+        // The webhook the service sent verifies with the SDK helper, and only with the right secret
+        await waitFor(() => hooksFor(hooks, created.id).length >= 1);
+        const hook = hooksFor(hooks, created.id)[0].h;
+        const event = constructWebhookEvent({ payload: hook.body, signatureHeader: hook.signature, secret: webhookSecret });
+        expect(event).toMatchObject({ sessionId: created.id, status: 'NEEDS_REVIEW', verification: { mrz: { found: true } } });
+        expect(() => constructWebhookEvent({ payload: hook.body, signatureHeader: hook.signature, secret: 'whsec_wrong' })).toThrow();
+        expect(() => constructWebhookEvent({ payload: hook.body.replace('NEEDS_REVIEW', 'APPROVED'), signatureHeader: hook.signature, secret: webhookSecret })).toThrow();
+
+        await server.sessions.delete(created.id);
+        await expect(server.sessions.get(created.id)).rejects.toMatchObject({ status: 404, isNotFound: true });
+      });
+
+      it('maps service errors to typed exceptions', async () => {
+        const server = new VerifyClient({ apiKey: apiKey, baseUrl: baseUrl() });
+        await expect(server.sessions.create({ externalRef: 'x', birthDate: 'tomorrow' })).rejects.toMatchObject({ status: 400, message: expect.stringContaining('birthDate') });
+        await expect(new VerifyClient({ apiKey: 'vk_wrong', baseUrl: baseUrl() }).sessions.get(randomUUID())).rejects.toMatchObject({ status: 401 });
+        const err = await server.sessions.evidence(randomUUID()).catch((e) => e);
+        expect(err).toBeInstanceOf(VerifyApiError);
+        expect(err.status).toBe(403); // evidence export is off for this tenant
+        await expect(new UploadClient({ baseUrl: baseUrl(), token: 'nope' }).getSession()).rejects.toMatchObject({ status: 404 });
+        // A non-image is refused by the service, and the SDK says so
+        const created = await server.sessions.create({ externalRef: `sdk-bad-${randomToken(4)}` });
+        await expect(new UploadClient({ baseUrl: baseUrl(), token: created.uploadToken }).upload('ID_FRONT', new Blob(['%PDF-1.7']))).rejects.toMatchObject({ status: 400 });
+        await server.sessions.delete(created.id);
+      });
+
+      it('reads and replays webhook events, tenant-scoped', async () => {
+        const server = new VerifyClient({ apiKey: apiKey, baseUrl: baseUrl() });
+        const events = await server.webhookEvents.list('DELIVERED');
+        expect(Array.isArray(events)).toBe(true);
+        expect(JSON.stringify(events)).not.toMatch(/body|secret/i);
+        await expect(server.webhookEvents.retry(randomUUID())).rejects.toMatchObject({ status: 404 });
       });
     });
   });
