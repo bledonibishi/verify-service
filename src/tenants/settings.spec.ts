@@ -7,6 +7,11 @@ describe('parseTenantFlags', () => {
     expect(r.settings).toEqual({ autoApprove: true, faceMatchThreshold: 95, documentRetentionDays: 0 });
   });
 
+  it('parses the monthly cap, including turning it off', () => {
+    expect(parseTenantFlags(['--monthly-cap=500', '--soft-limit=90']).settings).toEqual({ monthlyVerificationCap: 500, softLimitPercent: 90 });
+    expect(parseTenantFlags(['--monthly-cap=none']).settings).toEqual({ monthlyVerificationCap: null });
+  });
+
   it('supports turning things off', () => {
     expect(parseTenantFlags(['--no-auto-approve', '--no-evidence-export']).settings).toEqual({ autoApprove: false, evidenceExport: false });
   });
@@ -23,6 +28,14 @@ describe('parseTenantFlags', () => {
     ['--doc-retention-days= '],
     ['--doc-retention-days=1e2'],
     ['--record-retention-days'],
+    ['--monthly-cap=0'],
+    ['--monthly-cap='],
+    ['--monthly-cap=-5'],
+    ['--monthly-cap=1.5'],
+    ['--monthly-cap=NONE'],
+    ['--soft-limit=0'],
+    ['--soft-limit=101'],
+    ['--soft-limit='],
     ['--nope'],
   ])('rejects %s', (arg) => {
     expect(() => parseTenantFlags([arg])).toThrow();

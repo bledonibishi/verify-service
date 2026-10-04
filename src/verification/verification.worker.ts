@@ -173,10 +173,11 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     }
 
     const live = await this.checkLiveness(job, session.livenessSessionId, session.tenant.livenessMinConfidence);
-    const { face, missing, source } = await this.checkFace(job, session.documents, session.tenant.faceMatchThreshold, live.referenceImage);
+    const { face, missing, source, outage: faceOutage } = await this.checkFace(job, session.documents, session.tenant.faceMatchThreshold, live.referenceImage);
     const outcome = bindFaceToLiveness({
       ...withFace(withLiveness(mrz, live.outcome, live.performed), face, missing),
       faceSource: face ? source : null,
+      outages: [...(faceOutage ? ['face_unavailable'] : []), ...(live.outage ? ['liveness_unavailable'] : [])],
     });
     return {
       outcome,
@@ -205,15 +206,16 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     job: ClaimedJob,
     providerSessionId: string | null,
     minConfidence: number,
-  ): Promise<{ outcome: LivenessOutcome | null; performed: boolean; referenceImage?: Buffer }> {
+  ): Promise<{ outcome: LivenessOutcome | null; performed: boolean; referenceImage?: Buffer; outage?: boolean }> {
     if (!providerSessionId) return { outcome: null, performed: false };
     try {
       const r = await this.liveness.getResult(providerSessionId);
       return { outcome: livenessOutcome(r, minConfidence), performed: true, referenceImage: r.referenceImage };
     } catch (err) {
       if (!(err instanceof LivenessUnavailableError)) throw err;
-      if (this.liveness.name !== 'none') this.logger.warn(`Liveness unavailable for job ${job.id}: ${err.message}`);
-      return { outcome: null, performed: true };
+      const configured = this.liveness.name !== 'none';
+      if (configured) this.logger.warn(`Liveness unavailable for job ${job.id}: ${err.message}`);
+      return { outcome: null, performed: true, outage: configured };
     }
   }
 
@@ -223,7 +225,7 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     documents: { kind: DocumentKind; storageKey: string }[],
     threshold: number,
     referenceImage?: Buffer,
-  ): Promise<{ face: FaceOutcome | null; missing: string[]; source: 'liveness' | 'selfie' }> {
+  ): Promise<{ face: FaceOutcome | null; missing: string[]; source: 'liveness' | 'selfie'; outage?: boolean }> {
     const front = documents.find((d) => d.kind === DocumentKind.ID_FRONT);
     const selfie = documents.find((d) => d.kind === DocumentKind.SELFIE);
     const source = referenceImage ? 'liveness' : 'selfie';
@@ -241,8 +243,9 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     } catch (err) {
       if (!(err instanceof FaceUnavailableError)) throw err;
       // Every session now goes to review; make a broken deployment visible (but not a deliberate "none").
-      if (this.face.name !== 'none') this.logger.warn(`Face matching unavailable for job ${job.id}: ${err.message}`);
-      return { face: null, missing: [], source };
+      const configured = this.face.name !== 'none';
+      if (configured) this.logger.warn(`Face matching unavailable for job ${job.id}: ${err.message}`);
+      return { face: null, missing: [], source, outage: configured };
     }
   }
 
@@ -312,6 +315,26 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
           event: 'verification.completed',
           detail: { decision, issues: outcome.issueCodes },
         },
+      });
+      // Metering, in the same transaction as the decision: a completed verification is counted once
+      // (unique per session), and one that failed because of us is recorded but not billed.
+      const ourFailure = outcome.issueCodes.includes('PIPELINE_ERROR') ? 'pipeline_error' : outcome.issueCodes.includes('OCR_UNAVAILABLE') ? 'ocr_unavailable' : outcome.outages?.[0] ?? null;
+      await tx.usageEvent.createMany({
+        data: [
+          {
+            tenantId: session.tenantId,
+            sessionId: session.id,
+            kind: 'verification',
+            occurredAt: new Date(),
+            billable: ourFailure === null,
+            nonBillableReason: ourFailure,
+            face: providers.face !== null,
+            liveness: providers.liveness !== null,
+            licence: outcome.licenceRequired && outcome.licence !== null,
+            autoDecided: decision === 'APPROVED',
+          },
+        ],
+        skipDuplicates: true,
       });
       // Queued in this transaction: the webhook exists if and only if the decision committed
       const queued = await this.outbox.enqueue(tx, session.tenant, {

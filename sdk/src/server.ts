@@ -6,6 +6,8 @@ import type {
   DocumentKind,
   EvidenceBundle,
   Session,
+  UsageEventRecord,
+  UsageSummary,
   WebhookEventRecord,
 } from './types';
 import { verifySignature } from './webhooks';
@@ -36,6 +38,13 @@ export class VerifyClient {
     evidence(id: string): Promise<{ bundle: EvidenceBundle; raw: string; signature: string }>;
     /** One decrypted document and its SHA-256, for tenants with evidence export enabled. */
     evidenceDocument(id: string, kind: DocumentKind): Promise<{ data: Uint8Array; contentType: string; sha256: string | null }>;
+  };
+
+  readonly usage: {
+    /** Totals for a UTC month (`2026-10`; default: the current month), to check an invoice against. */
+    get(month?: string): Promise<UsageSummary>;
+    /** The individual events behind the totals, oldest first. Pass the previous page's `nextCursor` to continue. */
+    events(month?: string, cursor?: string): Promise<{ month: string; items: UsageEventRecord[]; nextCursor: string | null }>;
   };
 
   readonly webhookEvents: {
@@ -73,6 +82,16 @@ export class VerifyClient {
           sha256: res.headers.get('x-document-sha256'),
         };
       },
+    };
+
+    const q = (params: Record<string, string | undefined>) => {
+      const e = Object.entries(params).filter(([, v]) => v !== undefined) as [string, string][];
+      return e.length ? '?' + e.map(([k, v]) => `${enc(k)}=${enc(v)}`).join('&') : '';
+    };
+    this.usage = {
+      get: (month) => this.http.json<UsageSummary>({ method: 'GET', path: `/v1/usage${q({ month })}`, headers: this.auth, retry: true }),
+      events: (month, cursor) =>
+        this.http.json({ method: 'GET', path: `/v1/usage/events${q({ month, cursor })}`, headers: this.auth, retry: true }),
     };
 
     this.webhookEvents = {

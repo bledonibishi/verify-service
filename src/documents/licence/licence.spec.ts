@@ -78,7 +78,11 @@ describe('parseLicenceFields', () => {
     for (const bad of ['4d. 10000000011', '4d. 100000000', '4d. 1000000001234', '4d. 1000 000001']) {
       expect(parseLicenceFields(bad).found).toEqual([]);
     }
-    expect(parseLicenceFields('4d. 1000000001 extra').found).toEqual(['4d']);
+    // Stray text after a valid number means the read is damaged, so the field is not accepted
+    for (const bad of ['4d. 1000000001 extra', '4d. 1000000001\nsome other line', '4d. 1000000001 1000000001', '4d. 1000000001.', '5. DL1234567 extra', '5. DL1234567\nstray', '5. DL1234567 DL7654321']) {
+      expect(parseLicenceFields(bad).found).toEqual([]);
+    }
+    expect(parseLicenceFields('4d.  1000000001\n').found).toEqual(['4d']); // surrounding whitespace is fine
     for (const bad of ['3. 115.05.1990', '3. 15.05.19901', '3. 15.05.199', '3. 1990']) {
       expect(parseLicenceFields(bad).found).toEqual([]);
     }

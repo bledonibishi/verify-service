@@ -16,6 +16,7 @@ import { buildTd1, SAMPLE, Td1Fields } from '../src/documents/mrz/testing';
 import { OCR_PROVIDER, OcrProvider, OcrUnavailableError } from '../src/ocr/ocr-provider';
 import { FACE_PROVIDER, FaceComparison, FaceProvider, FaceUnavailableError } from '../src/face/face-provider';
 import { LIVENESS_PROVIDER, LivenessProvider, LivenessResult, LivenessUnavailableError } from '../src/liveness/liveness-provider';
+import { execFile } from 'child_process';
 import { UploadClient, VerifyApiError, VerifyClient, constructWebhookEvent } from '../sdk/src';
 import { OutboxService } from '../src/webhooks/outbox.service';
 import { WebhookDispatcher } from '../src/webhooks/dispatcher';
@@ -47,8 +48,11 @@ const goodFace = async (): Promise<FaceComparison> => ({ status: 'compared', sim
 let faceImpl: () => Promise<FaceComparison> = goodFace;
 let faceCalls = 0;
 let lastSelfie: Buffer | undefined;
+let faceName = 'fake-face';
 const fakeFace: FaceProvider = {
-  name: 'fake-face',
+  get name() {
+    return faceName;
+  },
   compare: async (_id, selfie) => {
     faceCalls++;
     lastSelfie = selfie;
@@ -61,8 +65,11 @@ let liveImpl: () => Promise<LivenessResult> = goodLive;
 let liveCalls = 0;
 let sessionCounter = 0;
 let createImpl: () => Promise<{ providerSessionId: string }> = async () => ({ providerSessionId: `live-${++sessionCounter}` });
+let liveName = 'fake-live';
 const fakeLiveness: LivenessProvider = {
-  name: 'fake-live',
+  get name() {
+    return liveName;
+  },
   createSession: () => createImpl(),
   getResult: async () => {
     liveCalls++;
@@ -2106,9 +2113,10 @@ describe('verification flow (e2e)', () => {
     });
   });
 
+  const baseUrl = () => `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
+
   describe('hosted page, upload API and client SDK', () => {
     const http = () => app.getHttpServer();
-    const baseUrl = () => `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
     const create = async (extra: object = {}) => (await request(http()).post('/v1/sessions').set(auth()).send({ externalRef: `h-${randomToken(4)}`, ...extra }).expect(201)).body;
 
     describe('the hosted page', () => {
@@ -2295,6 +2303,379 @@ describe('verification flow (e2e)', () => {
         expect(JSON.stringify(events)).not.toMatch(/body|secret/i);
         await expect(server.webhookEvents.retry(randomUUID())).rejects.toMatchObject({ status: 404 });
       });
+    });
+  });
+
+  describe('usage metering and monthly caps', () => {
+    const http = () => app.getHttpServer();
+    const suffix = randomToken(6).toLowerCase().replace(/[^a-z0-9]/g, 'x');
+    type U = { id: string; key: string; h: { Authorization: string } };
+    const monthNow = () => new Date().toISOString().slice(0, 7);
+
+    async function mk(name: string, extra: object = {}): Promise<U> {
+      const key = `vk_${name}_${suffix}`;
+      const t = await prisma.tenant.create({ data: { name: `usage-${name}-${suffix}`, apiKeyHash: sha256(key), webhookSecret: `whsec_${name}`, ...extra } });
+      return { id: t.id, key, h: { Authorization: `Bearer ${key}` } };
+    }
+
+    beforeEach(() => {
+      ocrImpl = async () => ({ text: mrzText() });
+      faceImpl = goodFace;
+      liveImpl = goodLive;
+      licenceImpl = async () => ({ text: licenceText() });
+      faceName = 'fake-face';
+      liveName = 'fake-live';
+    });
+
+    /** Runs a verification to completion for a tenant. */
+    async function completed(t: U, ref: string, o: { licence?: boolean; liveness?: boolean; back?: boolean } = {}) {
+      const created = await request(http()).post('/v1/sessions').set(t.h).send({ externalRef: ref, firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15', requireDrivingLicence: o.licence ?? false }).expect(201);
+      const token = created.body.uploadToken as string;
+      const kinds = ['ID_FRONT', 'SELFIE', ...(o.back === false ? [] : ['ID_BACK']), ...(o.licence ? ['LICENCE_FRONT'] : [])];
+      for (const kind of kinds) await request(http()).post(`/v1/upload/${token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+      if (o.liveness !== false) await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
+      await request(http()).post(`/v1/upload/${token}/submit`).expect(200);
+      for (let i = 0; i < 200; i++) {
+        const row = await prisma.session.findUnique({ where: { id: created.body.id } });
+        if (row && row.status !== 'PROCESSING') break;
+        await new Promise((r) => setTimeout(r, 25));
+      }
+      return created.body.id as string;
+    }
+    const eventsOf = (sessionId: string) => prisma.usageEvent.findMany({ where: { sessionId } });
+
+    describe('what is recorded', () => {
+      it('writes exactly one event per completed verification, with the features that ran', async () => {
+        const t = await mk('flags', { autoApprove: true });
+        const auto = await completed(t, 'a');
+        expect(await eventsOf(auto)).toEqual([expect.objectContaining({ tenantId: t.id, kind: 'verification', quantity: 1, billable: true, nonBillableReason: null, face: true, liveness: true, licence: false, autoDecided: true })]);
+
+        const noLive = await completed(t, 'b', { liveness: false });
+        expect((await eventsOf(noLive))[0]).toMatchObject({ face: true, liveness: false, autoDecided: false }); // no liveness: sent to review
+
+        const lic = await completed(t, 'c', { licence: true });
+        expect((await eventsOf(lic))[0]).toMatchObject({ licence: true, face: true, liveness: true, autoDecided: true });
+      });
+
+      it('counts a verification sent to review as completed, and a later reviewer decision adds nothing', async () => {
+        const t = await mk('review'); // auto-approve off
+        const id = await completed(t, 'r');
+        expect((await prisma.session.findUnique({ where: { id } }))?.status).toBe('NEEDS_REVIEW');
+        expect(await eventsOf(id)).toHaveLength(1);
+        await prisma.session.update({ where: { id }, data: { status: 'APPROVED', decidedAt: new Date() } }); // as if a reviewer decided
+        expect(await eventsOf(id)).toHaveLength(1);
+      });
+
+      it('records our own failures as not billable, with the reason', async () => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+        try {
+          const t = await mk('failures');
+          ocrImpl = async () => { throw new Error('always broken'); };
+          const gaveUp = await completed(t, 'f1');
+          expect((await eventsOf(gaveUp))[0]).toMatchObject({ billable: false, nonBillableReason: 'pipeline_error', face: false, liveness: false });
+          ocrImpl = async () => { throw new OcrUnavailableError('no engine'); };
+          const noEngine = await completed(t, 'f2');
+          expect((await eventsOf(noEngine))[0]).toMatchObject({ billable: false, nonBillableReason: 'ocr_unavailable' });
+          const u = (await request(http()).get('/v1/usage').set(t.h).expect(200)).body;
+          expect(u.verifications).toMatchObject({ billable: 0, nonBillable: 2, net: 0, nonBillableByReason: { pipeline_error: 1, ocr_unavailable: 1 } });
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('does not bill a face-match or liveness outage, but does bill a provider that is deliberately off', async () => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+        try {
+          const t = await mk('outages');
+          faceImpl = async () => { throw new FaceUnavailableError('credentials rejected'); };
+          expect((await eventsOf(await completed(t, 'face-down')))[0]).toMatchObject({ billable: false, nonBillableReason: 'face_unavailable' });
+          faceImpl = goodFace;
+          liveImpl = async () => { throw new LivenessUnavailableError('provider down'); };
+          expect((await eventsOf(await completed(t, 'live-down')))[0]).toMatchObject({ billable: false, nonBillableReason: 'liveness_unavailable' });
+          liveImpl = goodLive;
+
+          // "none" means the tenant chose not to have it: nothing failed, so it is billed like any other verification
+          faceName = 'none';
+          faceImpl = async () => { throw new FaceUnavailableError('face matching is not configured'); };
+          expect((await eventsOf(await completed(t, 'face-off')))[0]).toMatchObject({ billable: true, nonBillableReason: null, face: false });
+          faceName = 'fake-face';
+          faceImpl = goodFace;
+          liveName = 'none';
+          liveImpl = async () => { throw new LivenessUnavailableError('liveness is not configured'); };
+          expect((await eventsOf(await completed(t, 'live-off')))[0]).toMatchObject({ billable: true, liveness: false });
+
+          const u = (await request(http()).get('/v1/usage').set(t.h).expect(200)).body;
+          expect(u.verifications).toMatchObject({ billable: 2, nonBillable: 2, nonBillableByReason: { face_unavailable: 1, liveness_unavailable: 1 } });
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+      it('writes nothing for sessions that were never submitted or that expired', async () => {
+        const t = await mk('unused');
+        const open = (await request(http()).post('/v1/sessions').set(t.h).send({ externalRef: 'x' }).expect(201)).body;
+        const old = (await request(http()).post('/v1/sessions').set(t.h).send({ externalRef: 'y' }).expect(201)).body;
+        await prisma.session.update({ where: { id: old.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+        await request(http()).get(`/v1/upload/${old.uploadToken}`).expect(410);
+        expect(await prisma.usageEvent.count({ where: { tenantId: t.id } })).toBe(0);
+        expect(open.id).toBeDefined();
+      });
+
+      it('survives erasing the person: the invoice trail stays, the personal data goes', async () => {
+        const t = await mk('erase');
+        const id = await completed(t, 'erase-me');
+        await request(http()).delete(`/v1/sessions/${id}`).set(t.h).expect(204);
+        expect(await prisma.session.count({ where: { id } })).toBe(0);
+        expect(await eventsOf(id)).toHaveLength(1); // usage has no foreign key to the session
+        expect((await request(http()).get('/v1/usage').set(t.h).expect(200)).body.verifications.billable).toBe(1);
+      });
+
+      it('counts a session once even when several workers process it', async () => {
+        const t = await mk('race');
+        ocrImpl = async () => {
+          await new Promise((r) => setTimeout(r, 40));
+          return { text: mrzText() };
+        };
+        const id = await completed(t, 'race');
+        await Promise.all([worker.tick(), worker.tick(), worker.tick()]);
+        expect(await eventsOf(id)).toHaveLength(1);
+        // And the database itself refuses a second one
+        await expect(prisma.usageEvent.create({ data: { tenantId: t.id, sessionId: id, kind: 'verification', occurredAt: new Date() } })).rejects.toThrow();
+      });
+
+      it('holds ids, times and booleans only: no name, reference or date of birth', async () => {
+        const t = await mk('pii');
+        const id = await completed(t, 'customer-ref-9001');
+        const dump = JSON.stringify([await eventsOf(id), (await request(http()).get('/v1/usage/events').set(t.h).expect(200)).body, (await request(http()).get('/v1/usage').set(t.h).expect(200)).body]);
+        for (const secret of ['Dema', 'Testi', 'customer-ref-9001', '1990', '1000000001', 'DL1234567']) expect(dump).not.toContain(secret);
+      });
+    });
+
+    describe('GET /v1/usage', () => {
+      it('summarises the month, defaulting to the current one, and nothing for other months', async () => {
+        const t = await mk('totals', { autoApprove: true });
+        await completed(t, 'a');
+        await completed(t, 'b', { liveness: false });
+        await completed(t, 'c', { licence: true });
+        const res = (await request(http()).get('/v1/usage').set(t.h).expect(200)).body;
+        expect(res.month).toBe(monthNow());
+        expect(res.verifications).toEqual({ billable: 3, nonBillable: 0, nonBillableByReason: {}, adjustments: 0, net: 3 });
+        expect(res.features).toEqual({ face: 3, liveness: 2, licence: 1, autoDecided: 2 });
+        expect(res.cap).toMatchObject({ limit: null, softLimitPercent: 80 });
+        const past = (await request(http()).get('/v1/usage?month=2020-01').set(t.h).expect(200)).body;
+        expect(past.verifications.net).toBe(0);
+        expect(past.cap.committed).toBeNull();
+      });
+
+      it('validates the month, and needs an API key', async () => {
+        const t = await mk('validate');
+        for (const bad of ['2026-13', 'october', '2026-1', '1999-01', '2026-10-01']) await request(http()).get(`/v1/usage?month=${bad}`).set(t.h).expect(400);
+        await request(http()).get('/v1/usage').expect(401);
+        await request(http()).get('/v1/usage/events').expect(401);
+        await request(http()).get('/v1/usage/events?cursor=not-a-uuid').set(t.h).expect(400);
+      });
+
+      it('never shows another tenant’s usage', async () => {
+        const a = await mk('iso-a');
+        const b = await mk('iso-b');
+        const id = await completed(a, 'a-only');
+        expect((await request(http()).get('/v1/usage').set(b.h).expect(200)).body.verifications.net).toBe(0);
+        const events = (await request(http()).get('/v1/usage/events').set(b.h).expect(200)).body;
+        expect(events.items).toEqual([]);
+        expect(JSON.stringify(events)).not.toContain(id);
+        expect((await request(http()).get('/v1/usage/events').set(a.h).expect(200)).body.items.map((e: { sessionId: string }) => e.sessionId)).toContain(id);
+      });
+
+      it('assigns events to the UTC month of the decision, to the second', async () => {
+        const t = await mk('boundary');
+        const at = (iso: string) => prisma.usageEvent.create({ data: { tenantId: t.id, kind: 'verification', sessionId: randomUUID(), occurredAt: new Date(iso) } });
+        await at('2025-09-30T23:59:59.999Z');
+        await at('2025-10-01T00:00:00.000Z');
+        await at('2025-10-31T23:59:59.999Z');
+        await at('2025-11-01T00:00:00.000Z');
+        const count = async (m: string) => (await request(http()).get(`/v1/usage?month=${m}`).set(t.h).expect(200)).body.verifications.billable;
+        expect([await count('2025-09'), await count('2025-10'), await count('2025-11')]).toEqual([1, 2, 1]);
+      });
+
+      it('applies adjustments and reports them separately from billable usage', async () => {
+        const t = await mk('adjust');
+        const at = new Date('2025-03-01T12:00:00Z');
+        await prisma.usageEvent.createMany({
+          data: [
+            ...Array.from({ length: 5 }, () => ({ tenantId: t.id, kind: 'verification', sessionId: randomUUID(), occurredAt: new Date('2025-03-10T10:00:00Z') })),
+            { tenantId: t.id, kind: 'adjustment', occurredAt: at, quantity: -2, note: 'credit for a disputed batch' },
+            { tenantId: t.id, kind: 'adjustment', occurredAt: at, quantity: 1, note: 'missed one' },
+          ],
+        });
+        const res = (await request(http()).get('/v1/usage?month=2025-03').set(t.h).expect(200)).body;
+        expect(res.verifications).toMatchObject({ billable: 5, adjustments: -1, net: 4 });
+        const events = (await request(http()).get('/v1/usage/events?month=2025-03').set(t.h).expect(200)).body.items;
+        expect(events.filter((e: { kind: string }) => e.kind === 'adjustment').map((e: { note: string }) => e.note).sort()).toEqual(['credit for a disputed batch', 'missed one']);
+      });
+
+      it('accepts a cursor only for the tenant and month it came from', async () => {
+        const a = await mk('cursor-a');
+        const b = await mk('cursor-b');
+        const mkEvents = (t: U, y: number, mo: number, n: number) =>
+          prisma.usageEvent.createMany({ data: Array.from({ length: n }, (_, i) => ({ tenantId: t.id, kind: 'verification', sessionId: randomUUID(), occurredAt: new Date(Date.UTC(y, mo, 1, 0, 0, i)) })) });
+        await mkEvents(a, 2025, 0, 105); // January: two pages
+        await mkEvents(a, 2025, 1, 3); // February
+        await mkEvents(b, 2025, 0, 3);
+        const jan = (await request(http()).get('/v1/usage/events?month=2025-01').set(a.h).expect(200)).body;
+        const cursor = jan.nextCursor as string;
+        expect(cursor).toBeTruthy();
+        // The same cursor against another month, or from another tenant, is refused instead of returning a short page
+        await request(http()).get(`/v1/usage/events?month=2025-02&cursor=${cursor}`).set(a.h).expect(400);
+        await request(http()).get(`/v1/usage/events?month=2025-01&cursor=${cursor}`).set(b.h).expect(400);
+        await request(http()).get(`/v1/usage/events?cursor=${cursor}`).set(a.h).expect(400); // current month
+        await request(http()).get(`/v1/usage/events?month=2025-01&cursor=${randomUUID()}`).set(a.h).expect(400); // unknown id
+        await request(http()).get(`/v1/usage/events?month=2025-01&cursor=${cursor}`).set(a.h).expect(200); // the right one still works
+      });
+
+      it('pages through the events, oldest first, 100 at a time', async () => {
+        const t = await mk('paging');
+        await prisma.usageEvent.createMany({
+          data: Array.from({ length: 105 }, (_, i) => ({ tenantId: t.id, kind: 'verification', sessionId: randomUUID(), occurredAt: new Date(Date.UTC(2025, 5, 1, 0, 0, i)) })),
+        });
+        const first = (await request(http()).get('/v1/usage/events?month=2025-06').set(t.h).expect(200)).body;
+        expect(first.items).toHaveLength(100);
+        expect(first.nextCursor).not.toBeNull();
+        const second = (await request(http()).get(`/v1/usage/events?month=2025-06&cursor=${first.nextCursor}`).set(t.h).expect(200)).body;
+        expect(second.items).toHaveLength(5);
+        expect(second.nextCursor).toBeNull();
+        const times = [...first.items, ...second.items].map((e: { occurredAt: string }) => e.occurredAt);
+        expect([...times].sort()).toEqual(times); // in order, no overlap
+        expect(new Set([...first.items, ...second.items].map((e: { id: string }) => e.id)).size).toBe(105);
+      });
+    });
+
+    describe('monthly cap', () => {
+      const create = (t: U, ref = 'x') => request(http()).post('/v1/sessions').set(t.h).send({ externalRef: ref });
+
+      it('lets sessions through up to the cap, then answers 429 with a clear code', async () => {
+        const t = await mk('cap2', { monthlyVerificationCap: 2 });
+        await create(t, '1').expect(201);
+        await create(t, '2').expect(201);
+        const blocked = await create(t, '3').expect(429);
+        expect(blocked.body).toMatchObject({ code: 'monthly_cap_reached', limit: 2, message: 'Monthly verification limit reached' });
+        // It is a different 429 from the rate limiter's
+        expect(blocked.body.code).toBeDefined();
+      });
+
+      it('counts sessions in flight, completed verifications, but not expired sessions or our own failures', async () => {
+        const t = await mk('capcount', { monthlyVerificationCap: 2 });
+        const done = await completed(t, 'done'); // a billable usage event now
+        const open = (await create(t, 'open').expect(201)).body; // one in flight
+        await create(t, 'blocked').expect(429);
+        // The in-flight session expires: its capacity comes back
+        await prisma.session.update({ where: { id: open.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
+        await create(t, 'now-fits').expect(201);
+        await create(t, 'blocked-again').expect(429);
+        // A failure of ours is not billed, so it does not use the cap either
+        const n = await mk('capfail', { monthlyVerificationCap: 1 });
+        await prisma.usageEvent.create({ data: { tenantId: n.id, kind: 'verification', sessionId: randomUUID(), occurredAt: new Date(), billable: false, nonBillableReason: 'pipeline_error' } });
+        await create(n, 'fits').expect(201);
+        expect(done).toBeDefined();
+      });
+
+      it('holds under parallel requests: exactly the cap gets through', async () => {
+        const t = await mk('cappar', { monthlyVerificationCap: 3 });
+        const results = await Promise.all(Array.from({ length: 12 }, (_, i) => create(t, `p${i}`)));
+        expect(results.filter((r) => r.status === 201)).toHaveLength(3);
+        expect(results.filter((r) => r.status === 429)).toHaveLength(9);
+        expect(await prisma.session.count({ where: { tenantId: t.id } })).toBe(3);
+      });
+
+      it('is per tenant, is off by default, and a change applies immediately', async () => {
+        const capped = await mk('capiso-a', { monthlyVerificationCap: 1 });
+        const free = await mk('capiso-b');
+        await create(capped, '1').expect(201);
+        await create(capped, '2').expect(429);
+        for (let i = 0; i < 5; i++) await create(free, `f${i}`).expect(201);
+        await prisma.tenant.update({ where: { id: capped.id }, data: { monthlyVerificationCap: 5 } });
+        await create(capped, '3').expect(201);
+        await prisma.tenant.update({ where: { id: free.id }, data: { monthlyVerificationCap: 1 } });
+        await create(free, 'now-blocked').expect(429);
+      });
+
+      it('shows the cap and what is left in the usage summary', async () => {
+        const t = await mk('capview', { monthlyVerificationCap: 4, softLimitPercent: 50 });
+        await create(t, '1').expect(201);
+        await create(t, '2').expect(201);
+        const u = (await request(http()).get('/v1/usage').set(t.h).expect(200)).body;
+        expect(u.cap).toEqual({ limit: 4, softLimitPercent: 50, committed: 2, remaining: 2 });
+      });
+
+      it('warns once a month when usage reaches the soft limit', async () => {
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+        try {
+          const t = await mk('soft', { monthlyVerificationCap: 10, softLimitPercent: 50 });
+          const hits = () => warn.mock.calls.filter((c) => String(c[0]).includes(t.id) && String(c[0]).includes('monthly verifications')).length;
+          for (let i = 1; i <= 4; i++) await create(t, `s${i}`).expect(201);
+          expect(hits()).toBe(0);
+          await create(t, 's5').expect(201); // the 5th is 50% of 10
+          expect(hits()).toBe(1);
+          await create(t, 's6').expect(201);
+          await create(t, 's7').expect(201);
+          expect(hits()).toBe(1); // not again this month
+          expect((await prisma.tenant.findUnique({ where: { id: t.id } }))?.softLimitNotifiedMonth).toBe(monthNow());
+          await prisma.tenant.update({ where: { id: t.id }, data: { softLimitNotifiedMonth: '2020-01' } }); // as if a new month began
+          await create(t, 's8').expect(201);
+          expect(hits()).toBe(2);
+          expect(JSON.stringify(warn.mock.calls)).not.toMatch(/s5|customer|Dema/); // no reference or personal data
+        } finally {
+          warn.mockRestore();
+        }
+      });
+    });
+
+    describe('operator tools', () => {
+      const run = (script: string, args: string[]) =>
+        new Promise<{ code: number; out: string; err: string }>((resolve) => {
+          execFile('node', ['-r', 'ts-node/register', script, ...args], { env: process.env, cwd: process.cwd(), timeout: 60_000 }, (error, out, err) =>
+            resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0, out, err }),
+          );
+        });
+
+      it('records a credit and reports it in the CSV, with every tenant listed', async () => {
+        const t = await mk('cli');
+        const idle = await mk('cli-idle');
+        await prisma.usageEvent.createMany({ data: Array.from({ length: 4 }, () => ({ tenantId: t.id, kind: 'verification', sessionId: randomUUID(), occurredAt: new Date('2024-05-10T10:00:00Z') })) });
+        const adjust = await run('scripts/usage-adjust.ts', [t.id, '2024-05', '-3', 'credit', 'for', 'disputed', 'batch']);
+        expect(adjust.code).toBe(0);
+        const report = await run('scripts/usage-report.ts', ['2024-05']);
+        expect(report.code).toBe(0);
+        const rows = report.out.trim().split('\n').map((l) => l.split(','));
+        expect(rows[0].slice(0, 7)).toEqual(['month', 'tenant_id', 'tenant_name', 'billable', 'non_billable', 'adjustments', 'net_billable']);
+        const mine = rows.find((r) => r[1] === t.id)!;
+        expect(mine.slice(3, 7)).toEqual(['4', '0', '-3', '1']);
+        expect(rows.find((r) => r[1] === idle.id)!.slice(3, 7)).toEqual(['0', '0', '0', '0']); // present with zeros
+        const one = await run('scripts/usage-report.ts', ['2024-05', t.id]);
+        expect(one.out.trim().split('\n')).toHaveLength(2);
+        const events = (await request(http()).get('/v1/usage/events?month=2024-05').set(t.h).expect(200)).body.items;
+        expect(events.find((e: { kind: string }) => e.kind === 'adjustment')).toMatchObject({ quantity: -3, note: 'credit for disputed batch' });
+      }, 120_000);
+
+      it('refuses bad input without touching anything', async () => {
+        const t = await mk('cli-bad');
+        for (const args of [[t.id, '2024-13', '-1', 'reason'], [t.id, '2024-05', '0', 'reason'], [t.id, '2024-05', 'abc', 'reason'], [t.id, '2024-05', '-1', 'x'], [t.id, '2024-05', '-1'], ['00000000-0000-4000-8000-000000000000', '2024-05', '-1', 'reason']]) {
+          expect((await run('scripts/usage-adjust.ts', args)).code).toBe(1);
+        }
+        expect((await run('scripts/usage-report.ts', ['nope'])).code).toBe(1);
+        expect(await prisma.usageEvent.count({ where: { tenantId: t.id } })).toBe(0);
+      }, 120_000);
+    });
+
+    it('is available through the SDK', async () => {
+      const t = await mk('sdk', { autoApprove: true });
+      await completed(t, 'sdk');
+      const client = new VerifyClient({ apiKey: t.key, baseUrl: baseUrl() });
+      const summary = await client.usage.get();
+      expect(summary.verifications.net).toBe(1);
+      const page = await client.usage.events(summary.month);
+      expect(page.items).toHaveLength(1);
+      expect(page.nextCursor).toBeNull();
+      await expect(client.usage.get('2026-99')).rejects.toMatchObject({ status: 400 });
     });
   });
 });

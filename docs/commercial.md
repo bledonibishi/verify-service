@@ -1,6 +1,6 @@
 # Commercial layer: metering, pricing and billing (design)
 
-Status: **proposal, nothing implemented.** Decisions needed from the owner are collected in [Open decisions](#open-decisions). Nothing here is legal, tax or accounting advice; confirm the payment, VAT and invoicing parts with an accountant and a lawyer who know Kosovo.
+Status: **M1 (metering, usage API, report, caps) is implemented; M2 (plans, invoices) and M3 (payment collection) are not.** The owner's decisions are recorded in [Decisions](#decisions-owner-2026-10-05). Nothing here is legal, tax or accounting advice; confirm the payment, VAT and invoicing parts with an accountant and a lawyer who know Kosovo.
 
 ## 1. Goals and non-goals
 
@@ -98,7 +98,19 @@ Amounts are integer cents. Unit prices are copied onto invoice lines. Rounding: 
 
 ## 8. Phases
 
-1. **M1: metering and visibility.** `usage_events` in the decision transaction, `GET /v1/usage`, `pnpm usage:report`, per-tenant monthly cap, tests (idempotency, erasure keeps usage, non-billable reasons, tenant isolation, no personal data). No prices yet.
+### What M1 does today
+
+- **Usage events** (`usage_events`) are written by the verification worker in the decision transaction: one per completed verification, unique per session, with `face` / `liveness` / `licence` / `auto_decided` flags. A session the pipeline gave up on (`pipeline_error`), could not read for lack of an OCR engine (`ocr_unavailable`), or on which a **configured** face-match or liveness provider failed (`face_unavailable`, `liveness_unavailable`) is recorded as **not billable** with that reason. A provider that is deliberately off (`none`) is not an outage and is billed normally. Sessions never submitted or expired write nothing. Erasing a person does not touch usage (no foreign key to the session).
+- **`GET /v1/usage?month=2026-10`** (API key): billable, non-billable (by reason), adjustments, net, add-on counts, and the cap. **`GET /v1/usage/events`** lists the events behind the totals, oldest first, 100 per page. Both are tenant-scoped; `VerifyClient.usage.get/events` wrap them.
+- **`pnpm usage:report 2026-10 [tenantId]`** prints a CSV for invoicing with every tenant listed (zeros included, so nothing silently drops out of an invoice run). Tenant names that start with `=`, `+`, `-` or `@` are neutralised so a spreadsheet cannot run them as formulas.
+- **`pnpm usage:adjust <tenantId> 2026-10 -3 "reason"`** adds a correction row (negative is a credit); history is never edited. The note must not contain personal data.
+- **Monthly cap** per tenant (`--monthly-cap=N|none`, `--soft-limit=80` on `tenant:create` / `tenant:update`): once billable verifications this month plus sessions in flight reach the cap, `POST /v1/sessions` answers `429` with `code: "monthly_cap_reached"`. The check runs inside the session-creation transaction under a per-tenant lock, so parallel requests cannot overshoot (a test shows 12 parallel creations let exactly 3 through under a cap of 3). Sessions waiting for photos count until they expire (default 60 minutes). Our own failures do not use the cap. At the soft limit a warning is logged once per month.
+
+Known limits of M1: no prices or invoices; the soft limit only logs (no email); the cap counts the UTC month; changing a tenant's cap applies at once; metering starts when this ships (earlier sessions have no usage event, so back-fill is a separate decision if past usage must be billed).
+
+### Plan
+
+1. **M1: metering and visibility (done).** `usage_events` in the decision transaction, `GET /v1/usage`, `pnpm usage:report`, per-tenant monthly cap, tests (idempotency, erasure keeps usage, non-billable reasons, tenant isolation, no personal data). No prices yet.
 2. **M2: plans and invoices.** `plans`, `invoices`, draft generation from usage, CSV/PDF export, a CLI to issue and mark paid.
 3. **M3: payment collection**, only after the owner chooses an option in section 6.
 

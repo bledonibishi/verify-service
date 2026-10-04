@@ -17,6 +17,8 @@
     "tenant:create": "ts-node scripts/create-tenant.ts",
     "tenant:update": "ts-node scripts/update-tenant.ts",
     "reviewer": "ts-node scripts/reviewer.ts",
+    "usage:report": "ts-node scripts/usage-report.ts",
+    "usage:adjust": "ts-node scripts/usage-adjust.ts",
     "storage:check": "ts-node scripts/check-storage.ts",
     "check:mrz": "ts-node scripts/check-mrz.ts"
   },

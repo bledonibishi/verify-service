@@ -63,6 +63,8 @@ const current = await verify.sessions.get(session.id);
 
 Webhook rules (see the README for the full contract): verify the signature on the **raw** body before trusting anything, reject old timestamps (the helper does, 5 minutes by default), and **dedupe on `eventId`**. Events can arrive out of order after retries, so use `status` and `occurredAt`, not arrival order. `verify.webhookEvents.list('FAILED')` shows events that gave up and `retry(id)` replays one.
 
+Check an invoice against your own usage with `verify.usage.get('2026-10')` (totals, add-on counts, your cap) and `verify.usage.events('2026-10')`. If you have a monthly cap, `sessions.create` throws a `VerifyApiError` with `status: 429` and `code: 'monthly_cap_reached'` once it is reached.
+
 Other calls: `verify.sessions.delete(id)` (erase a person now), `evidence(id)` and `evidenceDocument(id, kind)` (tenants with evidence export; pass `webhookSecret` to have the bundle's signature checked for you). Reads and deletes are retried on network errors, 429 and 5xx (a delete whose reply was lost and that then finds nothing to delete counts as done); **creating a session is never retried**, because a repeat would create a second one. Errors are `VerifyApiError` (with `status`, `isNotFound`, `isRateLimited`) or `VerifyNetworkError`.
 
 ### In your own screens (browser SDK)

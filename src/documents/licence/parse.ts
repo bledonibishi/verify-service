@@ -112,11 +112,12 @@ export function parseLicenceFields(ocrText: string): LicenceParse {
 
   const v4d = values.get('4d');
   if (v4d) {
-    // The whole field must be exactly ten digits (or look-alikes): an extra or missing digit is
-    // damage, not something to trim until it fits.
-    const token = v4d.split(/\s+/)[0] ?? '';
-    if (/^[0-9OoIlLSBZ]{10}$/.test(token)) {
-      const d = digits(token);
+    // The whole value must be the number: exactly ten digits (or look-alikes). Anything after it,
+    // an extra or missing digit, or text from elsewhere on the card means the read is damaged, so
+    // it is not accepted.
+    const value = v4d.trim();
+    if (/^[0-9OoIlLSBZ]{10}$/.test(value)) {
+      const d = digits(value);
       if (/^\d{10}$/.test(d.value)) {
         fields.personalNumber = d.value;
         repaired ||= d.repaired;
@@ -127,8 +128,8 @@ export function parseLicenceFields(ocrText: string): LicenceParse {
 
   const v5 = values.get('5');
   if (v5) {
-    // Observed format: "DL" + digits. Anything else is not accepted as a licence number.
-    const m = v5.toUpperCase().match(/^(DL)\s?([0-9OIlLSB]{5,10})(?![0-9A-Z])/);
+    // Observed format: "DL" + digits, and nothing else in the field
+    const m = v5.trim().toUpperCase().match(/^(DL)\s?([0-9OIlLSB]{5,10})$/);
     if (m) {
       const d = digits(m[2]);
       if (/^\d{5,10}$/.test(d.value)) {
