@@ -27,6 +27,7 @@ export class SessionsService {
         expectedFirstName: dto.firstName,
         expectedLastName: dto.lastName,
         expectedBirthDate: dto.birthDate,
+        requireLicence: dto.requireDrivingLicence ?? false,
         expiresAt: new Date(Date.now() + ttlMinutes * 60_000),
         auditLogs: { create: { event: 'session.created' } },
       },
@@ -39,6 +40,7 @@ export class SessionsService {
       uploadUrl: `${base}/v1/upload/${token}`,
       expiresAt: session.expiresAt,
       status: session.status,
+      requireDrivingLicence: session.requireLicence,
     };
   }
 
@@ -55,6 +57,7 @@ export class SessionsService {
       externalRef: session.externalRef,
       status: expired ? 'EXPIRED' : session.status,
       expiresAt: session.expiresAt,
+      requireDrivingLicence: session.requireLicence,
       uploaded: session.documents.map((d) => d.kind),
       documentsDeletedAt: session.documentsDeletedAt,
       verification: session.result ? toSummary(session.result) : null,

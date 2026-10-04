@@ -11,7 +11,7 @@ Step 1 of the roadmap is in place: tenants, sessions, encrypted uploads, signed 
 - [x] Tenants + API keys, sessions, uploads, encrypted storage, signed webhooks
 - [x] Kosovo MRZ module: TD1 parser, check digits, OCR repair, name/DOB cross-check (`src/documents/mrz`, see [docs/kosovo-documents.md](docs/kosovo-documents.md))
 - [x] Verification pipeline: background worker reads the ID back MRZ (Tesseract), checks it against the expected identity and expiry, stores flags and issue codes
-- [ ] Driving licence field extraction
+- [x] Driving licence: printed fields read and cross-checked against the ID (provisional, see docs/kosovo-documents.md)
 - [x] Reviewer accounts, review API and a small review UI at `/review` (see [docs/review.md](docs/review.md))
 - [x] Face match: ID portrait vs selfie behind a `FaceProvider` interface (AWS Rekognition, per-tenant threshold)
 - [x] Liveness provider layer: `LivenessProvider` interface, challenge endpoint, per-tenant minimum confidence, required for auto-approve (AWS adapter + browser widget come with the upload page)
@@ -42,16 +42,16 @@ pnpm start:dev                          # http://localhost:4100
 | --- | --- | --- |
 | `DELETE` | `/v1/sessions/:id` | Erase a session and its documents now (data-subject request). `204`; `409` while it is being processed. |
 | `GET` | `/v1/sessions/:id/evidence` and `/evidence/documents/:kind` | Signed evidence bundle and decrypted documents, only for tenants with evidence export enabled. |
-| `POST` | `/v1/sessions` | Start a verification. Body: `externalRef` (your user id), optional `firstName`, `lastName`, `birthDate` (`YYYY-MM-DD`). Returns `id`, `uploadToken`, `uploadUrl`, `expiresAt`. |
+| `POST` | `/v1/sessions` | Start a verification. Body: `externalRef` (your user id), optional `firstName`, `lastName`, `birthDate` (`YYYY-MM-DD`), `requireDrivingLicence` (also read and cross-check a driving licence). Returns `id`, `uploadToken`, `uploadUrl`, `expiresAt`. |
 | `GET` | `/v1/sessions/:id` | Current `status`, which documents are uploaded, and `verification` (null until the automated checks have run). |
 
 **End-user** (authorised only by the one-time token in the URL)
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/v1/upload/:token/:kind` | Multipart field `file` (JPEG/PNG/WebP, max 8 MB). `kind` is `ID_FRONT`, `ID_BACK` or `SELFIE`. Re-uploading replaces the earlier file. |
+| `POST` | `/v1/upload/:token/:kind` | Multipart field `file` (JPEG/PNG/WebP, max 8 MB). `kind` is `ID_FRONT`, `ID_BACK`, `SELFIE`, `LICENCE_FRONT` or `LICENCE_BACK`. Re-uploading replaces the earlier file. |
 | `POST` | `/v1/upload/:token/liveness` | Start a liveness challenge. Returns `{ provider, sessionId, ... }` for the client widget. `501` if no provider is configured; `410` once the session is submitted or expired, `409` if another start won a concurrent race (retry). Calling again later replaces the earlier challenge. |
-| `POST` | `/v1/upload/:token/submit` | Finish. Requires `ID_FRONT` and `SELFIE`; `ID_BACK` is needed for the MRZ checks. Returns `PROCESSING` immediately. |
+| `POST` | `/v1/upload/:token/submit` | Finish. Requires `ID_FRONT` and `SELFIE`; `ID_BACK` is needed for the MRZ checks. A session created with `requireDrivingLicence` also needs `ID_BACK` and `LICENCE_FRONT`; licence uploads are refused for sessions that did not ask for one. Returns `PROCESSING` immediately. |
 
 Statuses: `PENDING`, `PROCESSING`, `NEEDS_REVIEW`, `APPROVED`, `REJECTED`, `EXPIRED`.
 
@@ -74,7 +74,7 @@ Decisions are conservative:
   "expired": false, "face": { "status": "match", "similarity": 96.3, "provider": "rekognition", "source": "liveness" }, "liveness": { "status": "live", "confidence": 98.1, "provider": "..." }, "checks": [{ "field": "documentNumber", "ok": true }], "issues": ["BIRTH_DATE_MISMATCH"] }
 ```
 
-Issue codes are the MRZ parser's (`CHECK_DIGIT_MISMATCH`, `OPTIONAL_DATA_PRESENT`, `OCR_REPAIRED`, ...) plus `ID_BACK_MISSING`, `MRZ_NOT_FOUND`, `SURNAME_MISMATCH`, `GIVEN_NAMES_MISMATCH`, `BIRTH_DATE_MISMATCH`, `EXPECTED_IDENTITY_MISSING`, `DOCUMENT_EXPIRED`, `OCR_UNAVAILABLE`, `PIPELINE_ERROR`.
+Issue codes are the MRZ parser's (`CHECK_DIGIT_MISMATCH`, `OPTIONAL_DATA_PRESENT`, `OCR_REPAIRED`, ...) plus `ID_BACK_MISSING`, `MRZ_NOT_FOUND`, `SURNAME_MISMATCH`, `GIVEN_NAMES_MISMATCH`, `BIRTH_DATE_MISMATCH`, `EXPECTED_IDENTITY_MISSING`, `DOCUMENT_EXPIRED`, `OCR_UNAVAILABLE`, `PIPELINE_ERROR`, and the `LICENCE_*` codes listed in [docs/kosovo-documents.md](docs/kosovo-documents.md).
 
 **Face match.** `FACE_PROVIDER=rekognition` (with `AWS_REGION`, e.g. `eu-central-1`) sends the `ID_FRONT` and `SELFIE` bytes to AWS Rekognition `CompareFaces`; it is off by default (`none`), so no image leaves the host unless you opt in. Credentials come from the SDK's default chain: environment variables locally, an IAM role in production. A minimal IAM policy allows `rekognition:CompareFaces` only. The tenant threshold (default 90, `pnpm tenant:create … --face-threshold=92`) is applied by the service, not by AWS. Results hold the similarity score and status (`match`, `below_threshold`, `no_face`, `unusable_image`); no face data or images are stored. Extra issue codes: `FACE_BELOW_THRESHOLD`, `FACE_NOT_DETECTED`, `FACE_MULTIPLE_FACES` (the selfie must contain exactly one face), `FACE_IMAGE_UNUSABLE`, `FACE_UNAVAILABLE` (provider off or credentials rejected; logged as a warning when a provider is configured), `ID_FRONT_MISSING`, `SELFIE_MISSING`. Rekognition's 5 MB limit and JPEG/PNG-only support are checked before calling AWS, so larger images and WebP are never sent and go to review as `FACE_IMAGE_UNUSABLE`. The threshold must be above 0 and at most 100 (0 would make the check meaningless).
 

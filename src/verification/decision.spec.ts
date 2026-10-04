@@ -1,5 +1,8 @@
 import { buildTd1, SAMPLE } from '../documents/mrz/testing';
-import { bindFaceToLiveness, checkIdBack, decide, emptyOutcome, faceOutcome, livenessOutcome, withFace, withLiveness } from './decision';
+import { checkLicence } from '../documents/licence';
+import { buildLicenceText, SAMPLE_LICENCE } from '../documents/licence/testing';
+import { parseTd1 } from '../documents/mrz';
+import { bindFaceToLiveness, checkIdBack, decide, emptyOutcome, faceOutcome, livenessOutcome, withFace, withLiveness, withLicence } from './decision';
 
 const who = { firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' };
 const text = (lines = buildTd1(SAMPLE)) => lines.join('\n');
@@ -88,5 +91,33 @@ describe('checkIdBack / decide', () => {
     expect(decide(bound, true)).toBe('NEEDS_REVIEW');
     // Defence in depth: even without the issue code the decision itself refuses
     expect(decide(base, true)).toBe('NEEDS_REVIEW');
+  });
+
+  describe('driving licence', () => {
+    const idData = parseTd1(buildTd1(SAMPLE), { now }).data!;
+    const base = () => full(checkIdBack(text(), who, now));
+    const licence = (over = {}) => checkLicence(buildLicenceText({ ...SAMPLE_LICENCE, ...over }), idData, now);
+
+    it('approves a session that needs a licence only when the licence is clean', () => {
+      expect(decide(withLicence(base(), licence()), true)).toBe('APPROVED');
+      expect(decide(withLicence(base(), licence({ surname: 'OTHER' })), true)).toBe('NEEDS_REVIEW');
+    });
+
+    it('does not care about the licence when the session did not ask for one', () => {
+      expect(base().licenceRequired).toBe(false);
+      expect(decide(base(), true)).toBe('APPROVED');
+    });
+
+    it('refuses to approve when a required licence is missing, even with no issue code on file', () => {
+      const missing = { ...base(), licenceRequired: true, licence: null };
+      expect(missing.issueCodes).toEqual([]);
+      expect(decide(missing, true)).toBe('NEEDS_REVIEW');
+      expect(withLicence(base(), null, 'LICENCE_FRONT_MISSING').issueCodes).toEqual(['LICENCE_FRONT_MISSING']);
+    });
+
+    it('refuses an unclean licence even if its issue codes were somehow dropped', () => {
+      const flagged = withLicence(base(), licence({ surname: 'OTHER' }));
+      expect(decide({ ...flagged, issueCodes: [] }, true)).toBe('NEEDS_REVIEW');
+    });
   });
 });

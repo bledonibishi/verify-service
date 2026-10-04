@@ -8,7 +8,9 @@ import { WebhookDispatcher } from '../webhooks/dispatcher';
 import { OCR_PROVIDER, OcrError, OcrProvider, OcrUnavailableError } from '../ocr/ocr-provider';
 import { FACE_PROVIDER, FaceProvider, FaceUnavailableError } from '../face/face-provider';
 import { LIVENESS_PROVIDER, LivenessProvider, LivenessUnavailableError } from '../liveness/liveness-provider';
-import { CheckOutcome, LivenessOutcome, bindFaceToLiveness, livenessOutcome, withLiveness, FaceOutcome, checkIdBack, decide, emptyOutcome, faceOutcome, withFace } from './decision';
+import { checkLicence, LicenceOutcome } from '../documents/licence';
+import type { Td1Data } from '../documents/mrz';
+import { CheckOutcome, LivenessOutcome, bindFaceToLiveness, livenessOutcome, withLiveness, FaceOutcome, readIdBack, decide, emptyOutcome, faceOutcome, withFace, withLicence } from './decision';
 import { toSummary } from './summary';
 
 const MAX_ATTEMPTS = 3;
@@ -142,6 +144,7 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
 
     const back = doc(DocumentKind.ID_BACK);
     let mrz: CheckOutcome;
+    let idData: Td1Data | null = null; // the ID's values, in memory only, for the licence cross-check
     let ocrName = this.ocr.name;
     if (!back) {
       mrz = emptyOutcome('ID_BACK_MISSING');
@@ -150,16 +153,23 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
       const image = await this.storage.get(back.storageKey);
       try {
         const { text } = await this.ocr.readText(image);
-        mrz = checkIdBack(text, {
+        const read = readIdBack(text, {
           firstName: session.expectedFirstName ?? undefined,
           lastName: session.expectedLastName ?? undefined,
           birthDate: session.expectedBirthDate ?? undefined,
         });
+        mrz = read.outcome;
+        idData = read.data;
       } catch (err) {
         // Without an OCR engine retrying is pointless; record it and let a person decide.
         if (!(err instanceof OcrUnavailableError)) throw err;
         mrz = emptyOutcome('OCR_UNAVAILABLE');
       }
+    }
+
+    if (session.requireLicence) {
+      const licence = await this.checkLicenceDocument(doc(DocumentKind.LICENCE_FRONT), idData);
+      mrz = withLicence(mrz, licence.outcome, licence.missingCode);
     }
 
     const live = await this.checkLiveness(job, session.livenessSessionId, session.tenant.livenessMinConfidence);
@@ -172,6 +182,22 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
       outcome,
       providers: { ocr: ocrName, face: face ? this.face.name : null, liveness: live.outcome ? this.liveness.name : null },
     };
+  }
+
+  /** Reads the driving licence front and cross-checks it against the ID. Values stay in this function. */
+  private async checkLicenceDocument(
+    front: { storageKey: string } | undefined,
+    idData: Td1Data | null,
+  ): Promise<{ outcome: LicenceOutcome | null; missingCode?: string }> {
+    if (!front) return { outcome: null, missingCode: 'LICENCE_FRONT_MISSING' };
+    const image = await this.storage.get(front.storageKey);
+    try {
+      const { text } = await this.ocr.readText(image, { mode: 'text' });
+      return { outcome: checkLicence(text, idData) };
+    } catch (err) {
+      if (!(err instanceof OcrUnavailableError)) throw err;
+      return { outcome: null, missingCode: 'OCR_UNAVAILABLE' };
+    }
   }
 
   /** Reads the liveness verdict. The reference image, if any, stays in memory for the face match. */
@@ -221,14 +247,20 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
   }
 
   /** Records the result and moves the session, only if it is still PROCESSING. */
-  private async finish(job: ClaimedJob, outcome: CheckOutcome, providers: { ocr: string; face: string | null; liveness: string | null }) {
+  private async finish(job: ClaimedJob, rawOutcome: CheckOutcome, providers: { ocr: string; face: string | null; liveness: string | null }) {
     const committed = await this.prisma.$transaction(async (tx) => {
+      let outcome = rawOutcome;
       // Ownership fence: if our lease lapsed and another worker re-claimed the job, we are stale
       // and must not record anything.
       const owned = await tx.verificationJob.updateMany({ where: this.fence(job), data: { status: 'DONE', lockedUntil: null } });
       if (owned.count === 0) return null;
       const session = await tx.session.findUnique({ where: { id: job.session_id }, include: { tenant: true } });
       if (!session) return null;
+      // Whatever ended the pipeline early (an error, a give-up), a session that required a licence
+      // still records that it was required and not checked, instead of dropping the requirement.
+      if (session.requireLicence && !outcome.licenceRequired) {
+        outcome = withLicence(outcome, null, 'LICENCE_NOT_CHECKED');
+      }
       const decision = decide(outcome, session.tenant.autoApprove);
       // The status condition is the single decider: if another worker or a reviewer already
       // moved the session, this update matches nothing and no result is written.
@@ -259,6 +291,19 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
           livenessStatus: outcome.liveness?.status ?? null,
           livenessConfidence: outcome.liveness?.confidence ?? null,
           livenessProvider: providers.liveness,
+          ...(outcome.licenceRequired
+            ? {
+                licenceFound: outcome.licence?.found ?? false,
+                licenceFields: outcome.licence?.fields ?? [],
+                licenceExpired: outcome.licence?.expired ?? null,
+                licenceDatesValid: outcome.licence?.datesValid ?? null,
+                licenceRepaired: outcome.licence?.repaired ?? null,
+                licencePersonalNumberMatch: outcome.licence?.personalNumber ?? null,
+                licenceSurnameMatch: outcome.licence?.surname ?? null,
+                licenceGivenNamesMatch: outcome.licence?.givenNames ?? null,
+                licenceBirthDateMatch: outcome.licence?.birthDate ?? null,
+              }
+            : {}),
         },
       });
       await tx.auditLog.create({

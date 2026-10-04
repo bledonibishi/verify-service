@@ -73,7 +73,19 @@ export const APP_JS = `
     LIVENESS_INCOMPLETE: 'Liveness check was not completed',
     LIVENESS_UNAVAILABLE: 'Liveness check was unavailable',
     ID_FRONT_MISSING: 'ID front was not uploaded',
-    SELFIE_MISSING: 'Selfie was not uploaded'
+    SELFIE_MISSING: 'Selfie was not uploaded',
+    LICENCE_FRONT_MISSING: 'Driving licence front was not uploaded',
+    LICENCE_NOT_CHECKED: 'A driving licence was required but could not be checked',
+    LICENCE_NOT_READABLE: 'Nothing could be read from the driving licence',
+    LICENCE_FIELDS_INCOMPLETE: 'Some driving licence fields could not be read',
+    LICENCE_OCR_REPAIRED: 'Driving licence characters had to be corrected after text recognition',
+    LICENCE_EXPIRED: 'Driving licence is expired',
+    LICENCE_DATES_IMPLAUSIBLE: 'Driving licence dates are not plausible',
+    LICENCE_CROSSCHECK_UNAVAILABLE: 'The ID could not be read, so the licence could not be compared with it',
+    LICENCE_PERSONAL_NUMBER_MISMATCH: 'Personal number on the licence differs from the ID',
+    LICENCE_SURNAME_MISMATCH: 'Surname on the licence differs from the ID',
+    LICENCE_GIVEN_NAMES_MISMATCH: 'Given names on the licence differ from the ID',
+    LICENCE_BIRTH_DATE_MISMATCH: 'Date of birth on the licence differs from the ID'
   };
 
   function el(tag, props, children) {
@@ -174,7 +186,8 @@ export const APP_JS = `
       if (my !== gen) return;
       holder.remove();
       var base = '/review/api/sessions/' + encodeURIComponent(s.id) + '/documents/';
-      var figs = ['ID_FRONT', 'ID_BACK', 'SELFIE'].map(function (k) {
+      var kinds = ['ID_FRONT', 'ID_BACK', 'SELFIE'].concat(['LICENCE_FRONT', 'LICENCE_BACK'].filter(function (k) { return s.documents.indexOf(k) >= 0; }));
+      var figs = kinds.map(function (k) {
         if (s.documents.indexOf(k) < 0) return el('figure', {}, [el('figcaption', { text: k.replace('_', ' ') + ' — not uploaded' })]);
         return el('figure', {}, [el('figcaption', { text: k.replace('_', ' ') }), el('img', { src: base + k, alt: k.replace('_', ' ') + ' photo' })]);
       });
@@ -200,6 +213,16 @@ export const APP_JS = `
         row(dl, 'Expired', v.expired === null ? 'not checked' : v.expired ? 'yes' : 'no', v.expired ? 'bad' : '');
         row(dl, 'Face match', v.face.status ? v.face.status + (v.face.similarity !== null ? ' (' + v.face.similarity.toFixed(1) + ')' : '') : 'not checked');
         row(dl, 'Liveness', v.liveness.status ? v.liveness.status + (v.liveness.confidence !== null ? ' (' + v.liveness.confidence.toFixed(1) + ')' : '') : 'not checked');
+        if (v.licence) {
+          var lc = v.licence;
+          row(dl, 'Licence fields read', lc.found ? 'all (' + lc.fields.join(', ') + ')' : (lc.fields.length ? 'only ' + lc.fields.join(', ') : 'none'), lc.found ? 'ok' : 'bad');
+          row(dl, 'Licence expired', lc.expired === null ? 'not checked' : lc.expired ? 'yes' : 'no', lc.expired ? 'bad' : '');
+          row(dl, 'Licence dates plausible', lc.datesValid === null ? 'not checked' : lc.datesValid ? 'yes' : 'no', lc.datesValid === false ? 'bad' : '');
+          row(dl, 'Licence personal number matches ID', lc.crossCheck.personalNumber || 'not checked');
+          row(dl, 'Licence surname matches ID', lc.crossCheck.surname || 'not checked');
+          row(dl, 'Licence given names match ID', lc.crossCheck.givenNames || 'not checked');
+          row(dl, 'Licence date of birth matches ID', lc.crossCheck.birthDate || 'not checked');
+        }
         res.appendChild(dl);
         var tags = el('p');
         v.issues.forEach(function (c) { tags.appendChild(el('span', { class: 'tag', text: ISSUES[c] || c })); });

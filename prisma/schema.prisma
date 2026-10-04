@@ -20,6 +20,9 @@ enum DocumentKind {
   ID_FRONT
   ID_BACK
   SELFIE
+  // Driving licence: the front is read (printed fields), the back is stored for reviewers only
+  LICENCE_FRONT
+  LICENCE_BACK
 }
 
 model Tenant {
@@ -64,6 +67,8 @@ model Session {
   expectedBirthDate String? @map("expected_birth_date")
   // Set when the user starts a liveness challenge; the result is read by the pipeline
   livenessSessionId String? @map("liveness_session_id")
+  // When true the user must also upload a driving licence, which is read and cross-checked with the ID
+  requireLicence Boolean @default(false) @map("require_licence")
   expiresAt   DateTime      @map("expires_at")
   createdAt   DateTime      @default(now()) @map("created_at")
   updatedAt   DateTime      @updatedAt @map("updated_at")
@@ -170,6 +175,18 @@ model VerificationResult {
   livenessStatus     String? @map("liveness_status")
   livenessConfidence Float?  @map("liveness_confidence")
   livenessProvider   String? @map("liveness_provider")
+  // Driving licence checks; null when the session did not ask for a licence. Flags and field NAMES
+  // only: no value printed on the licence is stored.
+  licenceFound            Boolean?  @map("licence_found")
+  licenceFields           String[]  @default([]) @map("licence_fields")
+  licenceExpired          Boolean?  @map("licence_expired")
+  licenceDatesValid       Boolean?  @map("licence_dates_valid")
+  licenceRepaired         Boolean?  @map("licence_repaired")
+  // match | mismatch | unavailable (the ID could not be read, so there was nothing to compare with)
+  licencePersonalNumberMatch String? @map("licence_personal_number_match")
+  licenceSurnameMatch     String?   @map("licence_surname_match")
+  licenceGivenNamesMatch  String?   @map("licence_given_names_match")
+  licenceBirthDateMatch   String?   @map("licence_birth_date_match")
   createdAt       DateTime @default(now()) @map("created_at")
 
   @@map("verification_results")
