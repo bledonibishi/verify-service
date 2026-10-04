@@ -38,3 +38,22 @@ describe('TesseractProvider', () => {
     await expect(new TesseractProvider(bin, 'eng', 200).readText(Buffer.from('x'))).rejects.toMatchObject({ reason: 'timeout' });
   });
 });
+
+describe('TesseractProvider modes', () => {
+  const dir2 = mkdtempSync(join(tmpdir(), 'tess-modes-'));
+  afterAll(() => rmSync(dir2, { recursive: true, force: true }));
+  // A stand-in "engine" that prints the arguments it was started with
+  const echo = join(dir2, 'echo');
+  writeFileSync(echo, '#!/bin/sh\ncat >/dev/null\necho "$@"\n');
+  chmodSync(echo, 0o755);
+
+  it('restricts the alphabet for the MRZ (default) but not for printed text', async () => {
+    const p = new TesseractProvider(echo, 'ocrb', 5000, 'eng+sqi');
+    const mrz = (await p.readText(Buffer.from('x'))).text;
+    expect(mrz).toContain('tessedit_char_whitelist');
+    expect(mrz).toContain('-l ocrb');
+    const text = (await p.readText(Buffer.from('x'), { mode: 'text' })).text;
+    expect(text).not.toContain('whitelist');
+    expect(text).toContain('-l eng+sqi');
+  });
+});

@@ -11,6 +11,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import request from 'supertest';
 import { hmacSign, randomToken, sha256 } from '../src/common/crypto';
+import { buildLicenceText, LicenceText, SAMPLE_LICENCE } from '../src/documents/licence/testing';
 import { buildTd1, SAMPLE, Td1Fields } from '../src/documents/mrz/testing';
 import { OCR_PROVIDER, OcrProvider, OcrUnavailableError } from '../src/ocr/ocr-provider';
 import { FACE_PROVIDER, FaceComparison, FaceProvider, FaceUnavailableError } from '../src/face/face-provider';
@@ -25,13 +26,21 @@ import { VerificationWorker } from '../src/verification/verification.worker';
 // Fake OCR: tests set `ocrImpl`. Nothing here touches a real OCR engine.
 let ocrImpl: () => Promise<{ text: string }> = async () => ({ text: '' });
 let ocrCalls = 0;
+// Printed-text reads (driving licence) are scripted separately from MRZ reads.
+let licenceImpl: () => Promise<{ text: string }> = async () => ({ text: '' });
+let licenceCalls = 0;
 const fakeOcr: OcrProvider = {
   name: 'fake',
-  readText: async () => {
+  readText: async (_image, options) => {
+    if (options?.mode === 'text') {
+      licenceCalls++;
+      return licenceImpl();
+    }
     ocrCalls++;
     return ocrImpl();
   },
 };
+const licenceText = (f: Partial<LicenceText> = {}) => buildLicenceText({ ...SAMPLE_LICENCE, ...f });
 // Fake face provider: tests set `faceImpl`. AWS is never contacted.
 const goodFace = async (): Promise<FaceComparison> => ({ status: 'compared', similarity: 95 });
 let faceImpl: () => Promise<FaceComparison> = goodFace;
@@ -348,6 +357,7 @@ describe('verification flow (e2e)', () => {
       await setThreshold(90);
       faceImpl = goodFace;
       liveImpl = goodLive;
+      licenceImpl = async () => ({ text: '' });
       createImpl = async () => ({ providerSessionId: `live-${++sessionCounter}` });
       await setLivenessMin(90);
       ocrImpl = async () => ({ text: '' });
@@ -794,6 +804,173 @@ describe('verification flow (e2e)', () => {
       });
     });
 
+    describe('driving licence', () => {
+      beforeEach(() => {
+        ocrImpl = async () => ({ text: mrzText() });
+        licenceImpl = async () => ({ text: licenceText() });
+      });
+
+      /** A session that asks for a licence, with every upload and the liveness challenge done. */
+      async function licenceSession(ref: string, o: { omit?: string[]; require?: boolean } = {}) {
+        const created = await request(http())
+          .post('/v1/sessions')
+          .set(auth())
+          .send({ externalRef: ref, firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15', requireDrivingLicence: o.require ?? true })
+          .expect(201);
+        const token = created.body.uploadToken as string;
+        for (const kind of ['ID_FRONT', 'ID_BACK', 'SELFIE', 'LICENCE_FRONT', 'LICENCE_BACK']) {
+          if (o.omit?.includes(kind)) continue;
+          await request(http()).post(`/v1/upload/${token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+        }
+        await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
+        return { token, id: created.body.id as string, create: created.body };
+      }
+      const submitAndSettle = async (s: { token: string; id: string }) => {
+        await request(http()).post(`/v1/upload/${s.token}/submit`).expect(200);
+        return settled(s.id);
+      };
+
+      it('lets a session ask for a licence, and rejects a non-boolean flag', async () => {
+        const s = await licenceSession('lic-create');
+        expect(s.create.requireDrivingLicence).toBe(true);
+        await request(http()).post('/v1/sessions').set(auth()).send({ externalRef: 'x', requireDrivingLicence: 'yes' }).expect(400);
+        const plain = await request(http()).post('/v1/sessions').set(auth()).send({ externalRef: 'plain' }).expect(201);
+        expect(plain.body.requireDrivingLicence).toBe(false);
+      });
+
+      it('requires ID_BACK and LICENCE_FRONT to submit, but only for sessions that asked for one', async () => {
+        const noLicence = await licenceSession('lic-missing-front', { omit: ['LICENCE_FRONT'] });
+        const r1 = await request(http()).post(`/v1/upload/${noLicence.token}/submit`).expect(400);
+        expect(r1.body.message).toContain('LICENCE_FRONT');
+        const noBack = await licenceSession('lic-missing-idback', { omit: ['ID_BACK'] });
+        await request(http()).post(`/v1/upload/${noBack.token}/submit`).expect(400);
+        // The licence back is optional (it is stored for reviewers, never read)
+        const noLicBack = await licenceSession('lic-no-back', { omit: ['LICENCE_BACK'] });
+        await request(http()).post(`/v1/upload/${noLicBack.token}/submit`).expect(200);
+        // A session that did not ask needs none of it
+        const plain = await licenceSession('lic-not-asked', { require: false, omit: ['LICENCE_FRONT', 'LICENCE_BACK', 'ID_BACK'] });
+        await request(http()).post(`/v1/upload/${plain.token}/submit`).expect(200);
+      });
+
+      it('approves only when the licence is read and matches the ID, and reports flags, not values', async () => {
+        await setAutoApprove(true);
+        const s = await licenceSession('lic-ok');
+        const body = await submitAndSettle(s);
+        expect(body.status).toBe('APPROVED');
+        expect(body.verification.licence).toEqual({
+          found: true,
+          fields: ['1', '2', '3', '4a', '4b', '4d', '5', '9'],
+          expired: false,
+          datesValid: true,
+          repaired: false,
+          crossCheck: { personalNumber: 'match', surname: 'match', givenNames: 'match', birthDate: 'match' },
+        });
+        expect(body.verification.issues).toEqual([]);
+        // Nothing printed on the licence (or the ID) reaches the API response, the database or the audit log
+        const row = await prisma.verificationResult.findUnique({ where: { sessionId: s.id } });
+        const logs = await prisma.auditLog.findMany({ where: { sessionId: s.id } });
+        const events = await prisma.webhookEvent.findMany({ where: { sessionId: s.id } });
+        const dump = JSON.stringify([body, row, logs, events]);
+        for (const secret of ['TESTI', 'DEMA', '1000000001', 'DL1234567', 'PRISHTINE', '15.05.1990', '1990-05-15']) {
+          if (secret === '1990-05-15') continue; // the tenant's own expected date is part of its request, not read from a document
+          expect(dump).not.toContain(secret);
+        }
+      });
+
+      it('keeps a clean licence in NEEDS_REVIEW when auto-approve is off, and includes it in the webhook', async () => {
+        const s = await licenceSession('lic-off');
+        const body = await submitAndSettle(s);
+        expect(body.status).toBe('NEEDS_REVIEW');
+        expect(body.verification.licence.found).toBe(true);
+        await waitFor(() => hooksFor(hooks, s.id).length >= 1);
+        expect(hooksFor(hooks, s.id)[0].b.verification.licence).toMatchObject({ found: true, crossCheck: { personalNumber: 'match' } });
+      });
+
+      it.each([
+        ['a different personal number', { personalNumber: '1000000002' }, 'LICENCE_PERSONAL_NUMBER_MISMATCH', 'personalNumber'],
+        ['a different surname', { surname: 'OTHER' }, 'LICENCE_SURNAME_MISMATCH', 'surname'],
+        ['different given names', { givenNames: 'OTHER' }, 'LICENCE_GIVEN_NAMES_MISMATCH', 'givenNames'],
+        ['a different date of birth', { birth: '16.05.1990' }, 'LICENCE_BIRTH_DATE_MISMATCH', 'birthDate'],
+      ] as const)('sends %s to review even with auto-approve on', async (_n, over, code, key) => {
+        await setAutoApprove(true);
+        licenceImpl = async () => ({ text: licenceText(over) });
+        const body = await submitAndSettle(await licenceSession(`lic-${code}`));
+        expect(body.status).toBe('NEEDS_REVIEW');
+        expect(body.verification.issues).toEqual([code]);
+        expect(body.verification.licence.crossCheck[key]).toBe('mismatch');
+      });
+
+      it('sends an expired, implausible or partly read licence to review', async () => {
+        await setAutoApprove(true);
+        for (const [text, code] of [
+          [licenceText({ issue: '12.03.2010', expiry: '12.03.2020' }), 'LICENCE_EXPIRED'],
+          [licenceText({ issue: '12.03.2022', expiry: '12.03.2062' }), 'LICENCE_DATES_IMPLAUSIBLE'],
+          ['1. TESTI\n2. DEMA\n4d. 1000000001', 'LICENCE_FIELDS_INCOMPLETE'],
+          ['nothing legible', 'LICENCE_NOT_READABLE'],
+          [licenceText({ personalNumber: '1OOOOOOOO1' }), 'LICENCE_OCR_REPAIRED'],
+        ] as const) {
+          licenceImpl = async () => ({ text });
+          const body = await submitAndSettle(await licenceSession(`lic-${code}`));
+          expect(body.status).toBe('NEEDS_REVIEW');
+          expect(body.verification.issues).toContain(code);
+        }
+      });
+
+      it('cannot cross-check against an ID it could not read, and never approves', async () => {
+        await setAutoApprove(true);
+        ocrImpl = async () => ({ text: 'no machine readable zone' });
+        const body = await submitAndSettle(await licenceSession('lic-no-id'));
+        expect(body.status).toBe('NEEDS_REVIEW');
+        expect(body.verification.issues).toEqual(expect.arrayContaining(['MRZ_NOT_FOUND', 'LICENCE_CROSSCHECK_UNAVAILABLE']));
+        expect(body.verification.licence.crossCheck).toEqual({ personalNumber: 'unavailable', surname: 'unavailable', givenNames: 'unavailable', birthDate: 'unavailable' });
+      });
+
+      it('hands over without retrying when no OCR engine is installed for the licence', async () => {
+        await setAutoApprove(true);
+        const before = licenceCalls;
+        licenceImpl = async () => {
+          throw new OcrUnavailableError('missing');
+        };
+        const body = await submitAndSettle(await licenceSession('lic-no-engine'));
+        expect(body.status).toBe('NEEDS_REVIEW');
+        expect(body.verification.issues).toContain('OCR_UNAVAILABLE');
+        expect(body.verification.licence).toMatchObject({ found: false, fields: [] });
+        expect(licenceCalls - before).toBe(1);
+      });
+
+      it('retries a transient licence OCR failure', async () => {
+        let n = 0;
+        licenceImpl = async () => {
+          if (++n < 2) throw new Error('flaky');
+          return { text: licenceText() };
+        };
+        const body = await submitAndSettle(await licenceSession('lic-flaky'));
+        expect(body.verification.licence.found).toBe(true);
+        expect(n).toBe(2);
+      });
+
+      it('ignores an uploaded licence when the session did not ask for one', async () => {
+        await setAutoApprove(true);
+        const before = licenceCalls;
+        const body = await submitAndSettle(await licenceSession('lic-ignored', { require: false }));
+        expect(body.status).toBe('APPROVED'); // the licence plays no part
+        expect(body.verification.licence).toBeNull();
+        expect(licenceCalls - before).toBe(0);
+      });
+
+      it('stores the licence images with the other documents and erases them all together', async () => {
+        const s = await licenceSession('lic-docs');
+        await submitAndSettle(s);
+        const dir = join(storageDir, (await prisma.session.findUniqueOrThrow({ where: { id: s.id } })).tenantId, s.id);
+        expect(readdirSync(dir)).toHaveLength(5); // ID front/back, selfie, licence front/back
+        expect(await prisma.document.findMany({ where: { sessionId: s.id }, select: { kind: true } })).toEqual(
+          expect.arrayContaining([{ kind: 'LICENCE_FRONT' }, { kind: 'LICENCE_BACK' }]),
+        );
+        await request(http()).delete(`/v1/sessions/${s.id}`).set(auth()).expect(204);
+        expect(readdirSync(dir)).toHaveLength(0);
+      });
+    });
+
     it('does not expose another tenant’s verification result', async () => {
       ocrImpl = async () => ({ text: mrzText() });
       const id = await submitted('isolation');
@@ -1230,7 +1407,9 @@ describe('verification flow (e2e)', () => {
     it('uses each tenant’s own window', async () => {
       const a = await withDocs(t1, 'win-30', 45); // 30-day tenant: due
       const b = await withDocs(t2, 'win-90', 45); // 90-day tenant: not due
-      const c = await withDocs(tZero, 'win-0', 0); // immediate
+      // Decided a few seconds ago: Node's clock and the database's can differ by milliseconds, and a decision
+      // stamped at exactly "now" can look like the future to Postgres
+      const c = await withDocs(tZero, 'win-0', 0.0001);
       await retention.run();
       expect(files(t1, a.id)).toHaveLength(0);
       expect(files(t2, b.id)).toHaveLength(3);

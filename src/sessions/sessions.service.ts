@@ -27,6 +27,7 @@ export class SessionsService {
         expectedFirstName: dto.firstName,
         expectedLastName: dto.lastName,
         expectedBirthDate: dto.birthDate,
+        requireLicence: dto.requireDrivingLicence ?? false,
         expiresAt: new Date(Date.now() + ttlMinutes * 60_000),
         auditLogs: { create: { event: 'session.created' } },
       },
@@ -39,6 +40,7 @@ export class SessionsService {
       uploadUrl: `${base}/v1/upload/${token}`,
       expiresAt: session.expiresAt,
       status: session.status,
+      requireDrivingLicence: session.requireLicence,
     };
   }
 

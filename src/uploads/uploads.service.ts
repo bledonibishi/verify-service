@@ -122,6 +122,9 @@ export class UploadsService {
     if (!kinds.has(DocumentKind.ID_FRONT) || !kinds.has(DocumentKind.SELFIE)) {
       throw new BadRequestException('ID_FRONT and SELFIE are required before submitting');
     }
+    if (session.requireLicence && (!kinds.has(DocumentKind.ID_BACK) || !kinds.has(DocumentKind.LICENCE_FRONT))) {
+      throw new BadRequestException('ID_BACK and LICENCE_FRONT are required for a session that asks for a driving licence');
+    }
 
     // Atomic claim: only one concurrent submit can move the session out of PENDING. The job is
     // created in the same transaction so a PROCESSING session can never lack its job.

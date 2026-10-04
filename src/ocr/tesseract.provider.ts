@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { OcrError, OcrProvider, OcrResult, OcrUnavailableError } from './ocr-provider';
+import { OcrError, OcrOptions, OcrProvider, OcrResult, OcrUnavailableError } from './ocr-provider';
 
 /**
  * Self-hosted OCR through the `tesseract` command line. The image goes in on stdin and the text
@@ -13,15 +13,19 @@ export class TesseractProvider implements OcrProvider {
     private readonly binary = 'tesseract',
     private readonly lang = 'eng',
     private readonly timeoutMs = 30_000,
+    /** Languages for printed text (licences); the MRZ uses `lang`. e.g. `eng+sqi` once the Albanian data is installed. */
+    private readonly textLang = 'eng',
   ) {}
 
-  readText(image: Buffer): Promise<OcrResult> {
+  readText(image: Buffer, options: OcrOptions = {}): Promise<OcrResult> {
     return new Promise((resolve, reject) => {
-      const child = spawn(
-        this.binary,
-        ['stdin', 'stdout', '-l', this.lang, '--psm', '6', '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<'],
-        { stdio: ['pipe', 'pipe', 'pipe'] },
-      );
+      // The MRZ alphabet whitelist would destroy a licence (lower case, ë, punctuation), so printed
+      // text is read without one.
+      const args =
+        options.mode === 'text'
+          ? ['stdin', 'stdout', '-l', this.textLang, '--psm', '4']
+          : ['stdin', 'stdout', '-l', this.lang, '--psm', '6', '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<'];
+      const child = spawn(this.binary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
       const chunks: Buffer[] = [];
       let size = 0;
       let settled = false;

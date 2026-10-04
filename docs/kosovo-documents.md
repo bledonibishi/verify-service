@@ -39,6 +39,23 @@ Check digits use the standard 7-3-1 weighting. The composite digit covers line 1
 - Observed validity is ten years.
 - The back carries a QR code and a per-category table. The QR content has not been examined.
 
+### How the service handles it (`src/documents/licence`)
+
+A session created with `requireDrivingLicence: true` must also upload `LICENCE_FRONT` (and may upload `LICENCE_BACK`) next to `ID_FRONT`, `ID_BACK` and `SELFIE`. After submit the pipeline:
+
+1. Reads the licence front with OCR in `text` mode (no MRZ alphabet restriction; set `TESSERACT_TEXT_LANG`, for example `eng+sqi`, once the Albanian traineddata is installed).
+2. Extracts fields 1, 2, 3, 4a, 4b, 4d, 5 and 9 by their printed numbers. Labels may sit on separate lines or one line, in any order, with `.` or `)`; dates accept `.`, `-`, `/`; names go through `normalizeName` (`ë` becomes `E`). Look-alike characters (O/0, I/1, S/5, B/8) are repaired in dates and numbers, and any repair is reported as `LICENCE_OCR_REPAIRED` so a person still looks. A field it cannot read is simply "not found"; nothing is guessed. Fields 1, 2, 3, 4a, 4b, 4d and 5 must all be read for the licence to count as read; categories (9) are recorded but not required because OCR garbles them most often.
+3. Checks the dates: not expired, issued in the past, expiry after issue, validity between six months and 15 years (the samples show ten), holder at least 15 on the issue date.
+4. **Cross-checks against the ID card's MRZ**: personal number (field 4d against the ID's optional data 2), surname, given names (one may be the leading part of the other, so a licence printing only the first name still matches) and date of birth. If the ID could not be read there is nothing to compare, which is reported as `LICENCE_CROSSCHECK_UNAVAILABLE`, never as a match.
+
+Only flags and field *numbers* are stored and returned (`verification.licence`: `found`, `fields`, `expired`, `datesValid`, `repaired`, `crossCheck.{personalNumber,surname,givenNames,birthDate}`). No value printed on the licence is stored, logged or sent in a webhook; the ID's values used for the comparison exist only in memory. Auto-approval requires the licence to be completely clean (nothing flagged, no repair, every cross-check a match). Anything else goes to review, where the reviewer sees the licence images and each result.
+
+Issue codes: `LICENCE_FRONT_MISSING`, `LICENCE_NOT_READABLE`, `LICENCE_FIELDS_INCOMPLETE`, `LICENCE_OCR_REPAIRED`, `LICENCE_EXPIRED`, `LICENCE_DATES_IMPLAUSIBLE`, `LICENCE_CROSSCHECK_UNAVAILABLE`, `LICENCE_PERSONAL_NUMBER_MISMATCH`, `LICENCE_SURNAME_MISMATCH`, `LICENCE_GIVEN_NAMES_MISMATCH`, `LICENCE_BIRTH_DATE_MISMATCH` (plus `OCR_UNAVAILABLE` when no engine is installed).
+
+**Provisional.** The parser is written from the field numbering and the layout notes above, and tested only on synthetic text for fictional people. It has not been run on real licence photos. Tesseract's accuracy on a real card (the Albanian and Serbian text, the holographic background) is unknown, so expect many sessions to need review until it has been tuned against local samples in `fixtures/private/`.
+
+**Not done on purpose.** The QR code on the back is **not decoded** (its content is unknown and decoding real documents needs your go-ahead). The licence portrait is not compared with the selfie; the face match still uses the ID photo. Categories are read but not returned to tenants.
+
 ## Verification layers
 
 1. Chip read over NFC (strongest; needs a mobile SDK and Kosovo's signing certificates, availability unconfirmed).
