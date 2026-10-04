@@ -3,7 +3,8 @@ import { ConfigService } from '@nestjs/config';
 import { DocumentKind, Prisma, SessionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { StorageService } from '../storage/storage.service';
-import { WebhooksService } from '../webhooks/webhooks.service';
+import { OutboxService } from '../webhooks/outbox.service';
+import { WebhookDispatcher } from '../webhooks/dispatcher';
 import { OCR_PROVIDER, OcrError, OcrProvider, OcrUnavailableError } from '../ocr/ocr-provider';
 import { FACE_PROVIDER, FaceProvider, FaceUnavailableError } from '../face/face-provider';
 import { LIVENESS_PROVIDER, LivenessProvider, LivenessUnavailableError } from '../liveness/liveness-provider';
@@ -36,7 +37,8 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
-    private readonly webhooks: WebhooksService,
+    private readonly outbox: OutboxService,
+    private readonly dispatcher: WebhookDispatcher,
     private readonly config: ConfigService,
     @Inject(OCR_PROVIDER) private readonly ocr: OcrProvider,
     @Inject(FACE_PROVIDER) private readonly face: FaceProvider,
@@ -266,18 +268,16 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
           detail: { decision, issues: outcome.issueCodes },
         },
       });
-      return { session, result };
+      // Queued in this transaction: the webhook exists if and only if the decision committed
+      const queued = await this.outbox.enqueue(tx, session.tenant, {
+        sessionId: session.id,
+        externalRef: session.externalRef,
+        status: result.decision,
+        verification: toSummary(result),
+      });
+      return { queued };
     });
-    if (!committed) return;
-    const { session, result } = committed;
-    void this.webhooks.send(session.tenant, {
-      type: 'session.status_changed',
-      sessionId: session.id,
-      externalRef: session.externalRef,
-      status: result.decision,
-      occurredAt: new Date().toISOString(),
-      verification: toSummary(result),
-    });
+    if (committed?.queued) void this.dispatcher.wake();
   }
 
   /** Transient failure: retry with backoff, then give up and send the session to a person. */

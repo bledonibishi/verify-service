@@ -38,6 +38,7 @@ model Tenant {
   createdAt     DateTime  @default(now()) @map("created_at")
   sessions      Session[]
   reviewers     Reviewer[]
+  webhookEvents WebhookEvent[]
   // Documents (images) are deleted this many days after the final decision. 0 = right away.
   documentRetentionDays Int @default(30) @map("document_retention_days")
   // The whole session record (results, audit log, expected identity) is deleted this many days
@@ -69,6 +70,7 @@ model Session {
   documents   Document[]
   auditLogs   AuditLog[]
   job         VerificationJob?
+  webhookEvents WebhookEvent[]
   result      VerificationResult?
   // Set when a reviewer decides a NEEDS_REVIEW session
   reviewedById   String?   @map("reviewed_by_id")
@@ -220,4 +222,40 @@ model DeletionRecord {
 
   @@index([tenantId, deletedAt])
   @@map("deletion_records")
+}
+
+enum WebhookEventStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+// Outbox: written in the same transaction as the status change it announces, delivered by a
+// worker with retries. The body is stored exactly as sent so every attempt is byte-identical.
+model WebhookEvent {
+  id            String             @id @default(uuid())
+  tenantId      String             @map("tenant_id")
+  tenant        Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  // Erasing a session erases its pending and past events
+  sessionId     String             @map("session_id")
+  session       Session            @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  type          String
+  body          String
+  status        WebhookEventStatus @default(PENDING)
+  attempts      Int                @default(0)
+  // Bumped on every claim and never reset (a replay resets `attempts`): it fences outcomes so a
+  // stale in-flight delivery can never match a later claim of the same event
+  claims        Int                @default(0)
+  nextAttemptAt DateTime           @default(now()) @map("next_attempt_at")
+  lockedUntil   DateTime?          @map("locked_until")
+  // http_<status> | timeout | network | redirect | no_url: a fixed code, never the response body
+  lastError     String?            @map("last_error")
+  deliveredAt   DateTime?          @map("delivered_at")
+  // When it last entered FAILED; failed-event retention counts from here, not from creation
+  failedAt      DateTime?          @map("failed_at")
+  createdAt     DateTime           @default(now()) @map("created_at")
+
+  @@index([status, nextAttemptAt])
+  @@index([tenantId, createdAt])
+  @@map("webhook_events")
 }

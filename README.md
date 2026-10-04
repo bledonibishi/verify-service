@@ -18,7 +18,8 @@ Step 1 of the roadmap is in place: tenants, sessions, encrypted uploads, signed 
 - [x] Per-tenant retention, data-subject deletion and evidence export (see [docs/retention.md](docs/retention.md))
 - [x] S3-compatible storage adapter (eu-central-1, server-side encryption on top of ours), `pnpm storage:check`
 - [ ] NFC chip SDK, billing
-- [ ] SDK / embeddable upload widget, retention job, webhook retries
+- [x] Webhook outbox with retries, backoff and replay
+- [ ] SDK / embeddable upload widget
 
 ## Run locally
 
@@ -87,9 +88,20 @@ OCR needs the `tesseract` binary on the host (`brew install tesseract` / `apt in
 
 ### Webhooks
 
-`POST` to the tenant's webhook URL with JSON `{ type, sessionId, externalRef, status, occurredAt, verification }`. It is sent once the pipeline has decided (not at submit).
+`POST` to the tenant's webhook URL with JSON `{ eventId, type, sessionId, externalRef, status, occurredAt, verification?, review? }`, sent once the pipeline or a reviewer has decided (not at submit).
 
-Header `X-Verify-Signature: t=<unix>,v1=<hex>` where `v1 = HMAC-SHA256(webhookSecret, "<t>.<raw body>")`. Verify the signature and reject old timestamps.
+Headers: `X-Verify-Signature: t=<unix>,v1=<hex>` where `v1 = HMAC-SHA256(webhookSecret, "<t>.<raw body>")`, and `X-Verify-Event-Id` (same as `eventId` in the body). Verify the signature, reject old timestamps, and **dedupe on `eventId`**: delivery is at-least-once.
+
+**Reliability.** Events go through an outbox: the event row is written in the same database transaction as the status change, so a decision always has its webhook queued and a rolled-back decision never does. A dispatcher (several instances can run) delivers with a 10 s timeout. Any non-2xx answer, timeout or connection error is retried with growing waits (about 30 s, 2 min, 10 min, 30 min, 1 h, 3 h, 6 h, 12 h, with jitter), 9 attempts in all, and the body is byte-identical each time with a fresh signature timestamp. Redirects are not followed. After the last attempt the event is `FAILED`. Responses are never stored, only a code (`http_500`, `timeout`, `network`, `http_302`).
+
+Tenants can see and replay events (API key):
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/v1/webhook-events?status=` | The last 50 events (`PENDING`, `DELIVERED`, `FAILED`) with attempts and the last error code. |
+| `POST` | `/v1/webhook-events/:id/retry` | Re-queue a `FAILED` event, for example after fixing the endpoint (`409` otherwise). |
+
+Events are erased with their session; delivered ones are also deleted after 7 days and failed ones after 30 (see `docs/retention.md`). Events for one session can arrive out of order after retries: use `occurredAt` and the `status` itself rather than arrival order.
 
 ## Manual review
 
