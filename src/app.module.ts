@@ -7,6 +7,7 @@ import { SessionsController } from './sessions/sessions.controller';
 import { SessionsService } from './sessions/sessions.service';
 import { ApiKeyGuard } from './tenants/api-key.guard';
 import { StorageModule } from './storage/storage.module';
+import { UsageModule } from './usage/usage.module';
 import { UploadCorsMiddleware } from './uploads/upload-cors.middleware';
 import { UploadsController } from './uploads/uploads.controller';
 import { UploadsService } from './uploads/uploads.service';
@@ -29,6 +30,7 @@ import { WebhooksModule } from './webhooks/webhooks.module';
     LivenessModule,
     ReviewModule,
     RetentionModule,
+    UsageModule,
   ],
   controllers: [SessionsController, UploadsController, HostedController],
   providers: [

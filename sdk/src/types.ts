@@ -119,3 +119,47 @@ export interface UploadSessionInfo {
   /** Whether a liveness provider is configured. */
   liveness: boolean;
 }
+
+export interface UsageSummary {
+  /** UTC calendar month, `YYYY-MM`. */
+  month: string;
+  from: string;
+  to: string;
+  verifications: {
+    /** Completed verifications that are billed. */
+    billable: number;
+    /** Completed verifications that are not billed (our own failures). */
+    nonBillable: number;
+    nonBillableByReason: Record<string, number>;
+    /** Corrections: negative numbers are credits. */
+    adjustments: number;
+    /** billable + adjustments */
+    net: number;
+  };
+  /** Of the billable verifications, how many used each add-on. */
+  features: { face: number; liveness: number; licence: number; autoDecided: number };
+  cap: {
+    /** Null: no cap. */
+    limit: number | null;
+    softLimitPercent: number;
+    /** Billable this month plus sessions in flight; null for past months. */
+    committed: number | null;
+    remaining: number | null;
+  };
+}
+
+export interface UsageEventRecord {
+  id: string;
+  kind: 'verification' | 'adjustment';
+  /** One you already hold; null for adjustments. */
+  sessionId: string | null;
+  occurredAt: string;
+  quantity: number;
+  billable: boolean;
+  nonBillableReason: string | null;
+  face: boolean;
+  liveness: boolean;
+  licence: boolean;
+  autoDecided: boolean;
+  note: string | null;
+}

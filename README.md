@@ -115,6 +115,10 @@ const { hostedUrl } = await verify.sessions.create({ externalRef: user.id, first
 
 `POST /v1/sessions` also returns `hostedUrl`, and `GET /v1/upload/:token` (token only, no personal data) tells a client which photos to ask for.
 
+## Usage and limits
+
+Every completed verification is metered (one event per session, no personal data, kept even after the person is erased). Tenants read it with `GET /v1/usage?month=2026-10` and `GET /v1/usage/events`; operators run `pnpm usage:report 2026-10` for an invoicing CSV and `pnpm usage:adjust` for credits. A per-tenant monthly cap (`--monthly-cap=N`) protects against runaway cost: past it, `POST /v1/sessions` answers `429` with `code: "monthly_cap_reached"`. Our own failures are recorded but not billed. Design, decisions and what is still to come (plans, invoices, payment collection) in [docs/commercial.md](docs/commercial.md).
+
 ## Manual review
 
 Sessions that need a person land in a queue at `/review`. Reviewers are individual accounts belonging to one tenant, created from the command line:

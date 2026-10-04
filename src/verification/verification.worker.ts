@@ -313,6 +313,26 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
           detail: { decision, issues: outcome.issueCodes },
         },
       });
+      // Metering, in the same transaction as the decision: a completed verification is counted once
+      // (unique per session), and one that failed because of us is recorded but not billed.
+      const ourFailure = outcome.issueCodes.includes('PIPELINE_ERROR') ? 'pipeline_error' : outcome.issueCodes.includes('OCR_UNAVAILABLE') ? 'ocr_unavailable' : null;
+      await tx.usageEvent.createMany({
+        data: [
+          {
+            tenantId: session.tenantId,
+            sessionId: session.id,
+            kind: 'verification',
+            occurredAt: new Date(),
+            billable: ourFailure === null,
+            nonBillableReason: ourFailure,
+            face: providers.face !== null,
+            liveness: providers.liveness !== null,
+            licence: outcome.licenceRequired && outcome.licence !== null,
+            autoDecided: decision === 'APPROVED',
+          },
+        ],
+        skipDuplicates: true,
+      });
       // Queued in this transaction: the webhook exists if and only if the decision committed
       const queued = await this.outbox.enqueue(tx, session.tenant, {
         sessionId: session.id,

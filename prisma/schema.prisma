@@ -42,6 +42,13 @@ model Tenant {
   sessions      Session[]
   reviewers     Reviewer[]
   webhookEvents WebhookEvent[]
+  usageEvents   UsageEvent[]
+  // Cost protection: once this many verifications are billable or in flight in a UTC month,
+  // creating another session answers 429. Null means no cap.
+  monthlyVerificationCap Int? @map("monthly_verification_cap")
+  // A warning is logged (once a month) when usage reaches this percent of the cap
+  softLimitPercent       Int  @default(80) @map("soft_limit_percent")
+  softLimitNotifiedMonth String? @map("soft_limit_notified_month")
   // Documents (images) are deleted this many days after the final decision. 0 = right away.
   documentRetentionDays Int @default(30) @map("document_retention_days")
   // The whole session record (results, audit log, expected identity) is deleted this many days
@@ -275,4 +282,34 @@ model WebhookEvent {
   @@index([status, nextAttemptAt])
   @@index([tenantId, createdAt])
   @@map("webhook_events")
+}
+
+// One row per completed verification (kind "verification"), or an operator correction (kind
+// "adjustment", negative quantity for a credit). Written in the same transaction as the decision.
+// Holds ids, times and booleans only. session_id is deliberately not a foreign key: erasing a
+// person (retention or a data-subject request) must not erase the invoice trail.
+model UsageEvent {
+  id                String   @id @default(uuid())
+  tenantId          String   @map("tenant_id")
+  tenant            Tenant   @relation(fields: [tenantId], references: [id])
+  // verification | adjustment
+  kind              String   @default("verification")
+  // Null for adjustments. Unique per kind, so a session is counted once however often it is processed.
+  sessionId         String?  @map("session_id")
+  occurredAt        DateTime @map("occurred_at")
+  quantity          Int      @default(1)
+  billable          Boolean  @default(true)
+  // pipeline_error | ocr_unavailable: our failures, recorded but not billed
+  nonBillableReason String?  @map("non_billable_reason")
+  face              Boolean  @default(false)
+  liveness          Boolean  @default(false)
+  licence           Boolean  @default(false)
+  autoDecided       Boolean  @default(false) @map("auto_decided")
+  // Operator note on an adjustment (never personal data)
+  note              String?
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@unique([sessionId, kind])
+  @@index([tenantId, occurredAt])
+  @@map("usage_events")
 }

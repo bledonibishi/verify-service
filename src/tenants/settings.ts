@@ -6,11 +6,15 @@ export interface TenantSettings {
   documentRetentionDays: number;
   recordRetentionDays: number;
   evidenceExport: boolean;
+  /** Null: no cap. */
+  monthlyVerificationCap: number | null;
+  softLimitPercent: number;
 }
 
 export const SETTINGS_USAGE =
   '[--auto-approve|--no-auto-approve] [--face-threshold=90] [--liveness-threshold=90] ' +
-  '[--doc-retention-days=30] [--record-retention-days=1825] [--evidence-export|--no-evidence-export]';
+  '[--doc-retention-days=30] [--record-retention-days=1825] [--evidence-export|--no-evidence-export] ' +
+  '[--monthly-cap=N|none] [--soft-limit=80]';
 
 const MAX_DAYS = 36_500;
 
@@ -24,6 +28,18 @@ function days(flag: string, raw: string): number {
   // Number('') is 0, which would mean "delete immediately": a blank value must never parse
   const n = /^\d+$/.test(raw.trim()) ? Number(raw) : NaN;
   if (!Number.isInteger(n) || n < 0 || n > MAX_DAYS) throw new Error(`--${flag} must be a whole number of days from 0 to ${MAX_DAYS}`);
+  return n;
+}
+
+function cap(flag: string, raw: string): number {
+  const n = /^\d+$/.test(raw.trim()) ? Number(raw) : NaN;
+  if (!Number.isInteger(n) || n < 1 || n > 10_000_000) throw new Error(`--${flag} must be a whole number from 1 to 10000000, or "none"`);
+  return n;
+}
+
+function soft(flag: string, raw: string): number {
+  const n = /^\d+$/.test(raw.trim()) ? Number(raw) : NaN;
+  if (!Number.isInteger(n) || n < 1 || n > 100) throw new Error(`--${flag} must be a whole number from 1 to 100`);
   return n;
 }
 
@@ -46,6 +62,8 @@ export function parseTenantFlags(args: string[]): { settings: Partial<TenantSett
       case 'liveness-threshold': settings.livenessMinConfidence = percent(flag, value ?? ''); break;
       case 'doc-retention-days': settings.documentRetentionDays = days(flag, value ?? ''); break;
       case 'record-retention-days': settings.recordRetentionDays = days(flag, value ?? ''); break;
+      case 'monthly-cap': settings.monthlyVerificationCap = value === 'none' ? null : cap(flag, value ?? ''); break;
+      case 'soft-limit': settings.softLimitPercent = soft(flag, value ?? ''); break;
       default: throw new Error(`Unknown option --${flag}`);
     }
   }
@@ -66,4 +84,6 @@ export const DEFAULT_SETTINGS: TenantSettings = {
   documentRetentionDays: 30,
   recordRetentionDays: 1825,
   evidenceExport: false,
+  monthlyVerificationCap: null,
+  softLimitPercent: 80,
 };
