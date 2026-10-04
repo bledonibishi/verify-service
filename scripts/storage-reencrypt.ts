@@ -31,7 +31,7 @@ async function main() {
   const prisma = new PrismaClient();
   try {
     const r = await reencryptAll(prisma, storage, { dryRun, tenantId });
-    console.log(`${dryRun ? 'Would re-encrypt' : 'Re-encrypted'}: ${r.rewrapped}   already current: ${r.current}   missing: ${r.missing}   failed: ${r.failed}`);
+    console.log(`${dryRun ? 'Would re-encrypt' : 'Re-encrypted'}: ${r.rewrapped} documents, ${r.secretsRewrapped} authenticator secrets   already current: ${r.current}   missing: ${r.missing}   failed: ${r.failed}`);
     if (r.failed > 0) {
       console.log('Some documents failed and were left unchanged. Check the key service and run again.');
       process.exitCode = 1;

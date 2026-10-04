@@ -12,6 +12,11 @@ describe('parseTenantFlags', () => {
     expect(parseTenantFlags(['--monthly-cap=none']).settings).toEqual({ monthlyVerificationCap: null });
   });
 
+  it('parses the reviewer two-factor requirement', () => {
+    expect(parseTenantFlags(['--require-reviewer-2fa']).settings).toEqual({ requireReviewerTwoFactor: true });
+    expect(parseTenantFlags(['--no-require-reviewer-2fa']).settings).toEqual({ requireReviewerTwoFactor: false });
+  });
+
   it('supports turning things off', () => {
     expect(parseTenantFlags(['--no-auto-approve', '--no-evidence-export']).settings).toEqual({ autoApprove: false, evidenceExport: false });
   });

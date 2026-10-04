@@ -129,7 +129,7 @@ pnpm reviewer reset alice@customer.example
 pnpm reviewer disable alice@customer.example
 ```
 
-They sign in with email and password, see the documents next to what the tenant supplied and the automated results, and approve or reject (a reason is required to reject and is sent to the tenant). The decision is audit-logged and triggers the signed webhook with a `review` object `{ decision, reason, decidedAt }`; `GET /v1/sessions/:id` returns the same. Details, security model and API in [docs/review.md](docs/review.md).
+They sign in with email and password, see the documents next to what the tenant supplied and the automated results, and approve or reject (a reason is required to reject and is sent to the tenant). The decision is audit-logged and triggers the signed webhook with a `review` object `{ decision, reason, decidedAt }`; `GET /v1/sessions/:id` returns the same. Reviewers can add **two-factor sign-in** (authenticator app plus recovery codes), and a tenant can require it (`pnpm tenant:update <id> --require-reviewer-2fa`). Details, security model and API in [docs/review.md](docs/review.md).
 
 ## Retention
 

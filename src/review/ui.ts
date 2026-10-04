@@ -11,7 +11,7 @@ export const INDEX_HTML = `<!doctype html>
 <link rel="stylesheet" href="/review/app.css">
 </head>
 <body>
-<header><h1>Verification review</h1><div id="who" hidden><span id="who-name"></span> <button id="logout" type="button">Sign out</button></div></header>
+<header><h1>Verification review</h1><div id="who" hidden><span id="who-name"></span> <button id="security" type="button">Security</button> <button id="logout" type="button">Sign out</button></div></header>
 <main id="app"></main>
 <script src="/review/app.js"></script>
 </body>
@@ -33,7 +33,7 @@ table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;bord
 .tag{display:inline-block;padding:1px 8px;margin:1px 4px 1px 0;border-radius:10px;background:var(--bg);border:1px solid var(--line);font-size:12px}
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.grid figure{margin:0}
 .grid img{width:100%;max-height:420px;object-fit:contain;border:1px solid var(--line);border-radius:6px;background:#000}
-figcaption{color:var(--muted);font-size:13px;margin-bottom:4px}.muted{color:var(--muted)}.err{color:var(--bad)}.login{max-width:380px;margin:40px auto}.sp{margin-top:12px}
+figcaption{color:var(--muted);font-size:13px;margin-bottom:4px}.codes{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:6px;font-family:ui-monospace,monospace;font-size:15px;padding:10px;border:1px dashed var(--line);border-radius:6px;margin:8px 0}.secret{font-family:ui-monospace,monospace;word-break:break-all;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);margin:6px 0}.muted{color:var(--muted)}.err{color:var(--bad)}.login{max-width:380px;margin:40px auto}.sp{margin-top:12px}
 dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0}dt{color:var(--muted)}dd{margin:0}
 .ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
 @media (max-width:600px){main{padding:12px}}
@@ -101,14 +101,21 @@ export const APP_JS = `
   }
   function clear() { while (app.firstChild) app.removeChild(app.firstChild); }
 
+  // Thrown after the screen has already been replaced (signed out, or two-factor setup required): callers must not write into the old one
+  var HANDLED = 'signed-out';
+
   function api(method, path, body) {
     var opts = { method: method, credentials: 'same-origin', headers: {} };
     if (body !== undefined) { opts.headers['Content-Type'] = 'application/json'; opts.body = JSON.stringify(body); }
     return fetch('/review/api' + path, opts).then(function (res) {
-      if (res.status === 401 && path !== '/login') { showLogin(); throw new Error('signed-out'); }
       if (res.status === 204) return null;
       return res.json().catch(function () { return {}; }).then(function (data) {
-        if (!res.ok) { var e = new Error(data.message || 'Request failed'); e.status = res.status; throw e; }
+        // Only "not signed in" means the session is gone. A 401 for a wrong password or code does not:
+        // it must reach the form that asked, so one typo does not throw the person back to the start.
+        if (res.status === 401 && data.message === 'Not signed in') { showLogin(); throw new Error(HANDLED); }
+        // The organisation started requiring two-factor while this person was signed in
+        if (res.status === 403 && data.code === 'two_factor_setup_required') { showSecurity(true); throw new Error(HANDLED); }
+        if (!res.ok) { var e = new Error(data.message || 'Request failed'); e.status = res.status; e.code = data.code; throw e; }
         return data;
       });
     });
@@ -131,10 +138,109 @@ export const APP_JS = `
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
       api('POST', '/login', { email: email.value, password: pw.value })
-        .then(function () { pw.value = ''; start(); })
+        .then(function (res) {
+          pw.value = '';
+          // The password was right but a second factor is needed: no session yet, only a short-lived challenge
+          if (res && res.twoFactorRequired) return showSecondFactor(res.challenge);
+          start();
+        })
         .catch(function () { msg.textContent = 'Invalid email or password.'; });
     });
     app.appendChild(form);
+  }
+
+  function showSecondFactor(challenge, message) {
+    nav();
+    who.hidden = true;
+    clear();
+    var code = el('input', { type: 'text', id: 'code', autocomplete: 'one-time-code', inputmode: 'text', required: '', maxlength: '32' });
+    var msg = el('p', { class: 'err', role: 'alert', text: message || '' });
+    var form = el('form', { class: 'card login' }, [
+      el('h2', { text: 'Two-factor sign-in' }),
+      el('p', { class: 'muted', text: 'Enter the 6-digit code from your authenticator app, or one of your recovery codes.' }),
+      el('label', { for: 'code', text: 'Code' }), code,
+      msg,
+      el('button', { class: 'primary', type: 'submit', text: 'Verify' }),
+      el('button', { type: 'button', text: 'Back', onclick: function () { showLogin(); } })
+    ]);
+    form.addEventListener('submit', function (ev) {
+      ev.preventDefault();
+      api('POST', '/login/2fa', { challenge: challenge, code: code.value })
+        .then(function () { start(); })
+        .catch(function () { code.value = ''; msg.textContent = 'That code did not work, or it expired. Go back and sign in again if it keeps failing.'; });
+    });
+    app.appendChild(form);
+    code.focus();
+  }
+
+  // Two-factor settings. With forced = true the organisation requires it and nothing else is open until it is set up.
+  function showSecurity(forced) {
+    var my = nav();
+    clear();
+    var card = el('div', { class: 'card' }, [el('h2', { text: 'Two-factor sign-in' })]);
+    var body = el('div', { class: 'muted', text: 'Loading…' });
+    card.appendChild(body);
+    if (!forced) app.appendChild(el('button', { text: '← Back to queue', onclick: function () { location.hash = '#/'; start(); } }));
+    app.appendChild(card);
+
+    function field(id, label, type) { return [el('label', { for: id, text: label }), el('input', { type: type, id: id, autocomplete: type === 'password' ? 'current-password' : 'one-time-code' })]; }
+    function value(id) { return document.getElementById(id).value; }
+    function fail(msg, e) { msg.textContent = e && e.status === 401 ? 'The password or code was not right.' : e && e.status === 403 ? e.message : 'Something went wrong. Try again.'; }
+
+    function showCodes(codes) {
+      body.textContent = '';
+      body.className = '';
+      body.appendChild(el('p', { text: 'Two-factor sign-in is on. Save these recovery codes somewhere safe: each works once if you lose your phone. They are shown only now.' }));
+      body.appendChild(el('div', { class: 'codes' }, codes.map(function (c) { return el('span', { text: c }); })));
+      body.appendChild(el('button', { class: 'primary', type: 'button', text: 'I have saved them', onclick: function () { location.hash = '#/'; start(); } }));
+    }
+
+    api('GET', '/2fa').then(function (st) {
+      if (my !== gen) return;
+      body.textContent = '';
+      body.className = '';
+      if (!st.enabled) {
+        if (st.required) body.appendChild(el('p', { text: 'Your organisation requires two-factor sign-in. Set it up to continue.' }));
+        else body.appendChild(el('p', { class: 'muted', text: 'Adds a code from an authenticator app to your sign-in, so a stolen password is not enough.' }));
+        var msg = el('p', { class: 'err', role: 'alert' });
+        var start1 = el('div', {}, field('pw1', 'Your password', 'password').concat([
+          el('button', { class: 'primary', type: 'button', text: 'Set up', onclick: function () {
+            msg.textContent = '';
+            api('POST', '/2fa/setup', { password: value('pw1') }).then(function (s) {
+              if (my !== gen) return;
+              start1.remove();
+              body.appendChild(el('p', { text: 'In your authenticator app, add an account using this setup key (choose "enter a setup key", time-based):' }));
+              body.appendChild(el('div', { class: 'secret', text: s.secret }));
+              body.appendChild(el('p', { class: 'muted', text: 'Then enter the 6-digit code it shows to confirm.' }));
+              var m2 = el('p', { class: 'err', role: 'alert' });
+              var confirm = el('div', {}, field('code1', 'Code', 'text').concat([
+                el('button', { class: 'primary', type: 'button', text: 'Turn on', onclick: function () {
+                  m2.textContent = '';
+                  api('POST', '/2fa/enable', { code: value('code1') }).then(function (r) { if (my === gen) showCodes(r.recoveryCodes); }).catch(function (e) { fail(m2, e); });
+                } }), m2
+              ]));
+              body.appendChild(confirm);
+            }).catch(function (e) { fail(msg, e); });
+          } }), msg
+        ]));
+        body.appendChild(start1);
+      } else {
+        body.appendChild(el('p', { text: 'Two-factor sign-in is on. Recovery codes left: ' + st.recoveryCodesLeft + '.' }));
+        var m3 = el('p', { class: 'err', role: 'alert' });
+        var manage = el('div', {}, field('pw2', 'Your password', 'password').concat(field('code2', 'Current code (or a recovery code)', 'text'), [
+          el('button', { type: 'button', text: 'Get new recovery codes', onclick: function () {
+            m3.textContent = '';
+            api('POST', '/2fa/recovery-codes', { password: value('pw2'), code: value('code2') }).then(function (r) { if (my === gen) showCodes(r.recoveryCodes); }).catch(function (e) { fail(m3, e); });
+          } }),
+          st.required ? el('p', { class: 'muted', text: 'Your organisation requires two-factor sign-in, so it cannot be turned off.' }) : el('button', { class: 'danger', type: 'button', text: 'Turn off', onclick: function () {
+            m3.textContent = '';
+            api('POST', '/2fa/disable', { password: value('pw2'), code: value('code2') }).then(function () { if (my === gen) showSecurity(false); }).catch(function (e) { fail(m3, e); });
+          } }),
+          m3
+        ]));
+        body.appendChild(manage);
+      }
+    }).catch(function (e) { if (e.message !== 'signed-out') body.textContent = 'Could not load your settings.'; });
   }
 
   function showQueue() {
@@ -263,6 +369,7 @@ export const APP_JS = `
 
   function route() {
     var m = location.hash.match(/^#\\/s\\/([0-9a-f-]{36})$/);
+    if (location.hash === '#/security') return showSecurity(false);
     if (m) showDetail(m[1]); else showQueue();
   }
 
@@ -272,10 +379,13 @@ export const APP_JS = `
       if (at !== gen) return;
       document.getElementById('who-name').textContent = me.name || me.email;
       who.hidden = false;
+      // The organisation requires two-factor sign-in and this person has not set it up: nothing else is open yet
+      if (me.twoFactorSetupRequired) return showSecurity(true);
       route();
     }).catch(function () { /* showLogin already ran */ });
   }
 
+  document.getElementById('security').addEventListener('click', function () { location.hash = '#/security'; });
   document.getElementById('logout').addEventListener('click', function () {
     nav();
     api('POST', '/logout').then(function () { showLogin(); }).catch(function () { showLogin(); });
