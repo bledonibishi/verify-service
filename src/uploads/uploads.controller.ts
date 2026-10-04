@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Controller,
+  Get,
   HttpCode,
   Param,
   ParseEnumPipe,
@@ -18,6 +19,12 @@ const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 @Controller('v1/upload/:token')
 export class UploadsController {
   constructor(private readonly uploads: UploadsService) {}
+
+  /** What to ask this user for, and what is already uploaded. Token-authorised, no personal data. */
+  @Get()
+  describe(@Param('token') token: string) {
+    return this.uploads.describe(token);
+  }
 
   @Post('submit')
   @HttpCode(200)

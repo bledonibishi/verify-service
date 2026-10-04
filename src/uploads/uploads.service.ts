@@ -37,6 +37,34 @@ export class UploadsService {
   }
 
   /**
+   * What the end user's page needs to know, from the token alone. Deliberately holds nothing about
+   * the person (no names, no reference): only which pictures to ask for and what is already here.
+   */
+  async describe(token: string) {
+    const session = await this.openSession(token);
+    const steps: { kind: DocumentKind; required: boolean }[] = [
+      { kind: DocumentKind.ID_FRONT, required: true },
+      // Without the back, the machine-readable zone cannot be checked and a person must review
+      { kind: DocumentKind.ID_BACK, required: session.requireLicence },
+      ...(session.requireLicence
+        ? [
+            { kind: DocumentKind.LICENCE_FRONT, required: true },
+            { kind: DocumentKind.LICENCE_BACK, required: false },
+          ]
+        : []),
+      { kind: DocumentKind.SELFIE, required: true },
+    ];
+    return {
+      status: session.status,
+      expiresAt: session.expiresAt,
+      requireDrivingLicence: session.requireLicence,
+      steps,
+      uploaded: session.documents.map((d) => d.kind),
+      liveness: this.liveness.name !== 'none',
+    };
+  }
+
+  /**
    * Starts a liveness challenge for the session. The client widget runs it against the provider;
    * the pipeline reads the verdict after submit. Calling again replaces the earlier challenge.
    */

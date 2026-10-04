@@ -19,7 +19,7 @@ Step 1 of the roadmap is in place: tenants, sessions, encrypted uploads, signed 
 - [x] S3-compatible storage adapter (eu-central-1, server-side encryption on top of ours), `pnpm storage:check`
 - [ ] NFC chip SDK, billing
 - [x] Webhook outbox with retries, backoff and replay
-- [ ] SDK / embeddable upload widget
+- [x] TypeScript client SDK and a hosted capture page (see [docs/integration.md](docs/integration.md)); not yet tried in real browsers
 
 ## Run locally
 
@@ -102,6 +102,18 @@ Tenants can see and replay events (API key):
 | `POST` | `/v1/webhook-events/:id/retry` | Re-queue a `FAILED` event, for example after fixing the endpoint (`409` otherwise). |
 
 Events are erased with their session; delivered ones are also deleted after 7 days and failed ones after 30 (see `docs/retention.md`). Events for one session can arrive out of order after retries: use `occurredAt` and the `status` itself rather than arrival order.
+
+## Integrating
+
+Create a session on your server, send the user to the returned `hostedUrl` (a hosted page that captures and uploads the photos), and receive a signed webhook with the result. A dependency-free TypeScript SDK (`sdk/`) wraps the API, verifies webhook signatures and offers a browser upload client for your own screens. Guide, code samples and what is not covered yet: [docs/integration.md](docs/integration.md).
+
+```ts
+const verify = new VerifyClient({ apiKey: process.env.VERIFY_API_KEY!, baseUrl: 'https://verify.example.com' });
+const { hostedUrl } = await verify.sessions.create({ externalRef: user.id, firstName, lastName, birthDate });
+// redirect the user to hostedUrl; handle the webhook with constructWebhookEvent(...)
+```
+
+`POST /v1/sessions` also returns `hostedUrl`, and `GET /v1/upload/:token` (token only, no personal data) tells a client which photos to ask for.
 
 ## Manual review
 
