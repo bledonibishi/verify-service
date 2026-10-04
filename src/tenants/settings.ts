@@ -9,12 +9,13 @@ export interface TenantSettings {
   /** Null: no cap. */
   monthlyVerificationCap: number | null;
   softLimitPercent: number;
+  requireReviewerTwoFactor: boolean;
 }
 
 export const SETTINGS_USAGE =
   '[--auto-approve|--no-auto-approve] [--face-threshold=90] [--liveness-threshold=90] ' +
   '[--doc-retention-days=30] [--record-retention-days=1825] [--evidence-export|--no-evidence-export] ' +
-  '[--monthly-cap=N|none] [--soft-limit=80]';
+  '[--monthly-cap=N|none] [--soft-limit=80] [--require-reviewer-2fa|--no-require-reviewer-2fa]';
 
 const MAX_DAYS = 36_500;
 
@@ -57,6 +58,8 @@ export function parseTenantFlags(args: string[]): { settings: Partial<TenantSett
       case 'auto-approve': settings.autoApprove = true; break;
       case 'no-auto-approve': settings.autoApprove = false; break;
       case 'evidence-export': settings.evidenceExport = true; break;
+      case 'require-reviewer-2fa': settings.requireReviewerTwoFactor = true; break;
+      case 'no-require-reviewer-2fa': settings.requireReviewerTwoFactor = false; break;
       case 'no-evidence-export': settings.evidenceExport = false; break;
       case 'face-threshold': settings.faceMatchThreshold = percent(flag, value ?? ''); break;
       case 'liveness-threshold': settings.livenessMinConfidence = percent(flag, value ?? ''); break;
@@ -86,4 +89,5 @@ export const DEFAULT_SETTINGS: TenantSettings = {
   evidenceExport: false,
   monthlyVerificationCap: null,
   softLimitPercent: 80,
+  requireReviewerTwoFactor: false,
 };

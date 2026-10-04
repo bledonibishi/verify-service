@@ -62,8 +62,8 @@ KMS has a small monthly fee per key plus a small fee per request; check the curr
 
 1. Keep `STORAGE_ENCRYPTION_KEY` set (the service uses it **only to read** old objects once KMS is on).
 2. Set the KMS variables and restart.
-3. `pnpm storage:reencrypt --dry-run` shows how many objects would change (it reads and verifies every object, so it makes one KMS call per document); `pnpm storage:reencrypt` re-encrypts them (add `--tenant=<id>` to do one tenant at a time). It is safe to repeat and to interrupt, never writes an object back after its person was erased (it holds the session's row lock, which erasure also needs), counts anything it cannot convert as failed and leaves it untouched, and prints counts only.
-4. When it reports `already current` for everything and `failed: 0`, remove `STORAGE_ENCRYPTION_KEY` from the production configuration. **Keep a sealed offline backup of the old key** for as long as backups made before the migration may need restoring.
+3. `pnpm storage:reencrypt --dry-run` shows how many documents **and reviewers' authenticator secrets** would change (it reads and verifies every object, so it makes one KMS call per document); `pnpm storage:reencrypt` re-encrypts them (add `--tenant=<id>` to do one tenant at a time). It is safe to repeat and to interrupt, never writes an object back after its person was erased (it holds the session's row lock, which erasure also needs), counts anything it cannot convert as failed and leaves it untouched, and prints counts only.
+4. When it reports `failed: 0` and a second run changes nothing, remove `STORAGE_ENCRYPTION_KEY` from the production configuration. **Keep a sealed offline backup of the old key** for as long as backups made before the migration may need restoring.
 
 Switching back from `kms` to `env` is not supported without re-encrypting first.
 
@@ -76,5 +76,5 @@ Switching back from `kms` to `env` is not supported without re-encrypting first.
 ## Not covered
 
 - **Application-level keys per tenant.** One KMS key protects all tenants (separated by encryption context). Per-tenant keys are possible later if a customer demands their own key.
-- **Other secrets in the database.** Webhook secrets are stored in plain text because the service needs them to sign. Reviewer two-factor secrets (when added) use the same key provider.
+- **Other secrets in the database.** Webhook secrets are stored in plain text because the service needs them to sign. Reviewers' two-factor secrets use the same key provider (sealed and bound to the reviewer; see [review](review.md)).
 - **Backups, the database, and AWS itself** are outside this document.

@@ -42,6 +42,7 @@ async function main() {
   console.log(`Documents kept:   ${tenant.documentRetentionDays} days after the decision`);
   console.log(`Records kept:     ${tenant.recordRetentionDays} days after the decision`);
   console.log(`Monthly cap:      ${tenant.monthlyVerificationCap ?? 'none'} (warn at ${tenant.softLimitPercent}%)`);
+  console.log(`Reviewer 2FA:     ${tenant.requireReviewerTwoFactor ? 'required' : 'optional'}`);
   console.log(`Evidence export:  ${tenant.evidenceExport ? 'on' : 'off'}`);
   console.log(`API key:          ${apiKey}`);
   console.log(`Webhook secret:   ${webhookSecret}`);

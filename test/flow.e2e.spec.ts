@@ -25,6 +25,7 @@ import { reencryptAll } from '../src/storage/reencrypt';
 import { KeyUnavailableError, StorageService } from '../src/storage/storage.service';
 import { encrypt as legacyEncrypt } from '../src/common/crypto';
 import { hashPassword } from '../src/review/password';
+import { base32Decode, codeAt, stepOf } from '../src/review/totp';
 import { VerificationWorker } from '../src/verification/verification.worker';
 
 // Fake OCR: tests set `ocrImpl`. Nothing here touches a real OCR engine.
@@ -161,6 +162,8 @@ describe('verification flow (e2e)', () => {
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     // Listen once: otherwise supertest starts and stops the server around each request, and
     // concurrent requests (the race tests) can have it closed underneath them.
+    // Rate-limit tests send their own client address (X-Forwarded-For), so blocking that address cannot affect other tests
+    app.getHttpAdapter().getInstance().set('trust proxy', true);
     await app.listen(0);
   });
 
@@ -1126,7 +1129,7 @@ describe('verification flow (e2e)', () => {
       expect(raw).toMatch(/Path=\/review/);
       expect(JSON.stringify(res.body)).not.toMatch(/password|hash|token/i);
       const me = await request(http()).get('/review/api/me').set('Cookie', cookieOf(res)).expect(200);
-      expect(me.body).toEqual({ email: emailA, name: 'Reviewer A' });
+      expect(me.body).toEqual({ email: emailA, name: 'Reviewer A', twoFactorEnabled: false, twoFactorSetupRequired: false });
     });
 
     it('stores only a hash of the session token and a scrypt password hash', async () => {
@@ -1353,7 +1356,7 @@ describe('verification flow (e2e)', () => {
       process.env.LOGIN_RATE_LIMIT = '2';
       try {
         const codes: number[] = [];
-        for (let i = 0; i < 6; i++) codes.push((await login(`nobody-${suffix}@example.test`, 'x')).status);
+        for (let i = 0; i < 6; i++) codes.push((await login(`nobody-${suffix}@example.test`, 'x').set('X-Forwarded-For', '203.0.113.10')).status);
         expect(codes).toContain(429);
       } finally {
         process.env.LOGIN_RATE_LIMIT = normal;
@@ -2844,6 +2847,537 @@ describe('verification flow (e2e)', () => {
         spy.mockRestore();
       }
       await request(http()).get(`/v1/sessions/${id}/evidence/documents/SELFIE`).set(t.h).expect(200); // and it recovers
+    });
+  });
+
+  describe('reviewer two-factor sign-in', () => {
+    const http = () => app.getHttpServer();
+    const PW = 'a-long-test-password-2fa';
+    const suffix = randomToken(6).toLowerCase().replace(/[^a-z0-9]/g, 'x');
+    const cookieOf = (res: request.Response) => ((res.headers['set-cookie'] as unknown as string[] | undefined)?.[0] ?? '').split(';')[0];
+    const realNow = Date.now.bind(Date);
+    let offsetMs = 0;
+    let tenantId2: string;
+    let requiredTenantId: string;
+
+    /** Moves "now" forward, so a test can use fresh codes without waiting 30 seconds. */
+    const advance = (steps: number) => {
+      offsetMs += steps * 30_000;
+    };
+    const codeFor = (secretBase32: string, delta = 0) => codeAt(base32Decode(secretBase32), stepOf(realNow() + offsetMs) + delta);
+
+    beforeAll(async () => {
+      jest.spyOn(Date, 'now').mockImplementation(() => realNow() + offsetMs);
+      tenantId2 = (await prisma.tenant.create({ data: { name: `tf-${suffix}`, apiKeyHash: sha256(`vk_tf_${suffix}`), webhookSecret: 'x' } })).id;
+      requiredTenantId = (await prisma.tenant.create({ data: { name: `tf-req-${suffix}`, apiKeyHash: sha256(`vk_tfr_${suffix}`), webhookSecret: 'x', requireReviewerTwoFactor: true } })).id;
+    });
+    afterAll(() => {
+      jest.restoreAllMocks();
+    });
+
+    let n = 0;
+    async function reviewer(tenant = tenantId2, label = 'r') {
+      const email = `${label}-${++n}-${suffix}@example.test`;
+      const row = await prisma.reviewer.create({ data: { tenantId: tenant, email, passwordHash: await hashPassword(PW) } });
+      return { id: row.id, email };
+    }
+    const login = (email: string, password = PW) => request(http()).post('/review/api/login').send({ email, password });
+    const second = (challenge: string, code: string) => request(http()).post('/review/api/login/2fa').send({ challenge, code });
+    const sessionFor = async (email: string) => cookieOf(await login(email).expect(200));
+
+    /** Signs in, enrols two-factor and returns what a user would hold. */
+    async function enrolled(tenant = tenantId2) {
+      const r = await reviewer(tenant);
+      const cookie = await sessionFor(r.email);
+      const setup = (await request(http()).post('/review/api/2fa/setup').set('Cookie', cookie).send({ password: PW }).expect(200)).body;
+      const done = (await request(http()).post('/review/api/2fa/enable').set('Cookie', cookie).send({ code: codeFor(setup.secret) }).expect(200)).body;
+      return { ...r, cookie, secret: setup.secret as string, recovery: done.recoveryCodes as string[] };
+    }
+    /** A full two-step sign-in with a code for the next step (each code works once). */
+    async function signIn(u: { email: string; secret: string }) {
+      advance(1);
+      const step1 = await login(u.email).expect(200);
+      const res = await second(step1.body.challenge, codeFor(u.secret)).expect(200);
+      return cookieOf(res);
+    }
+
+    describe('setting it up', () => {
+      it('needs the password, shows the secret once, and stores it sealed, not in the clear', async () => {
+        const r = await reviewer();
+        const cookie = await sessionFor(r.email);
+        await request(http()).post('/review/api/2fa/setup').set('Cookie', cookie).send({ password: 'wrong-password-123' }).expect(401);
+        await request(http()).post('/review/api/2fa/setup').send({ password: PW }).expect(401);
+        const setup = (await request(http()).post('/review/api/2fa/setup').set('Cookie', cookie).send({ password: PW }).expect(200)).body;
+        expect(setup.secret).toMatch(/^[A-Z2-7]{32}$/);
+        expect(setup.otpauthUri).toContain(`secret=${setup.secret}`);
+        expect(setup.otpauthUri).toContain(encodeURIComponent(r.email));
+        const row = await prisma.reviewer.findUniqueOrThrow({ where: { id: r.id } });
+        expect(row.totpSecretSealed).toBeTruthy();
+        expect(row.totpEnabledAt).toBeNull(); // not on until a code is confirmed
+        expect(row.totpSecretSealed).not.toContain(setup.secret);
+        expect(Buffer.from(row.totpSecretSealed!, 'base64').subarray(0, 4).toString()).toBe('VSE0'); // sealed by the key provider, bound to the reviewer
+        expect(Buffer.from(row.totpSecretSealed!, 'base64').includes(base32Decode(setup.secret))).toBe(false);
+      });
+
+      it('turns on only with a code made from the secret, and gives single-use recovery codes stored as hashes', async () => {
+        const r = await reviewer();
+        const cookie = await sessionFor(r.email);
+        const setup = (await request(http()).post('/review/api/2fa/setup').set('Cookie', cookie).send({ password: PW }).expect(200)).body;
+        await request(http()).post('/review/api/2fa/enable').set('Cookie', cookie).send({ code: '000000' }).expect(401);
+        await request(http()).post('/review/api/2fa/enable').set('Cookie', cookie).send({ code: 'abc' }).expect(400);
+        expect((await prisma.reviewer.findUniqueOrThrow({ where: { id: r.id } })).totpEnabledAt).toBeNull();
+        const done = (await request(http()).post('/review/api/2fa/enable').set('Cookie', cookie).send({ code: codeFor(setup.secret) }).expect(200)).body;
+        expect(done.recoveryCodes).toHaveLength(10);
+        expect(new Set(done.recoveryCodes).size).toBe(10);
+        const stored = await prisma.recoveryCode.findMany({ where: { reviewerId: r.id } });
+        expect(stored).toHaveLength(10);
+        expect(JSON.stringify(stored)).not.toMatch(/[A-HJKMNP-Z2-9]{5}-[A-HJKMNP-Z2-9]{5}/); // only hashes
+        expect(stored.map((c) => c.codeHash).sort()).toEqual(done.recoveryCodes.map((c: string) => sha256(c)).sort());
+        const status = (await request(http()).get('/review/api/2fa').set('Cookie', cookie).expect(200)).body;
+        expect(status).toEqual({ enabled: true, recoveryCodesLeft: 10, required: false });
+        // Doing it again is refused, and cannot swap the secret
+        await request(http()).post('/review/api/2fa/setup').set('Cookie', cookie).send({ password: PW }).expect(409);
+        await request(http()).post('/review/api/2fa/enable').set('Cookie', cookie).send({ code: codeFor(setup.secret, 1) }).expect(400);
+      });
+
+      it('signs out every other browser of that reviewer when it is turned on, but not this one', async () => {
+        const r = await reviewer();
+        const mine = await sessionFor(r.email);
+        const stolen = await sessionFor(r.email);
+        const setup = (await request(http()).post('/review/api/2fa/setup').set('Cookie', mine).send({ password: PW }).expect(200)).body;
+        await request(http()).post('/review/api/2fa/enable').set('Cookie', mine).send({ code: codeFor(setup.secret) }).expect(200);
+        await request(http()).get('/review/api/me').set('Cookie', mine).expect(200);
+        await request(http()).get('/review/api/me').set('Cookie', stolen).expect(401);
+      });
+
+      it('only one of two parallel confirmations wins', async () => {
+        const r = await reviewer();
+        const cookie = await sessionFor(r.email);
+        const setup = (await request(http()).post('/review/api/2fa/setup').set('Cookie', cookie).send({ password: PW }).expect(200)).body;
+        const code = codeFor(setup.secret);
+        const results = await Promise.all([1, 2, 3].map(() => request(http()).post('/review/api/2fa/enable').set('Cookie', cookie).send({ code })));
+        expect(results.filter((x) => x.status === 200)).toHaveLength(1);
+        expect(await prisma.recoveryCode.count({ where: { reviewerId: r.id } })).toBe(10);
+      });
+    });
+
+    describe('signing in', () => {
+      it('gives a challenge, not a session, after the password; the session comes with a valid code', async () => {
+        const u = await enrolled();
+        advance(1);
+        const step1 = await login(u.email).expect(200);
+        expect(step1.body).toMatchObject({ twoFactorRequired: true, challenge: expect.any(String) });
+        expect(step1.headers['set-cookie']).toBeUndefined();
+        expect(JSON.stringify(step1.body)).not.toMatch(/secret|recovery|email/i);
+        // The challenge is not a login
+        await request(http()).get('/review/api/me').set('Cookie', `vr_session=${step1.body.challenge}`).expect(401);
+        await request(http()).get('/review/api/sessions').set('Authorization', `Bearer ${step1.body.challenge}`).expect(401);
+
+        const res = await second(step1.body.challenge, codeFor(u.secret)).expect(200);
+        expect(res.headers['set-cookie']).toBeDefined();
+        expect(res.headers['set-cookie']![0]).toMatch(/HttpOnly/i);
+        expect(res.headers['set-cookie']![0]).toMatch(/SameSite=Strict/i);
+        expect(res.body).toEqual({ email: u.email, name: null, twoFactorSetupRequired: false });
+        const me = await request(http()).get('/review/api/me').set('Cookie', cookieOf(res)).expect(200);
+        expect(me.body.twoFactorEnabled).toBe(true);
+      });
+
+      it('answers every failure with the same message', async () => {
+        const u = await enrolled();
+        advance(1);
+        const c1 = (await login(u.email).expect(200)).body.challenge;
+        const wrong = await second(c1, '000000').expect(401);
+        const unknown = await second('x'.repeat(43), codeFor(u.secret)).expect(401);
+        const expired = (await login(u.email).expect(200)).body.challenge;
+        await prisma.loginChallenge.updateMany({ where: { tokenHash: sha256(expired) }, data: { expiresAt: new Date(realNow() - 1000) } });
+        const late = await second(expired, codeFor(u.secret)).expect(401);
+        expect(new Set([wrong, unknown, late].map((x) => JSON.stringify(x.body.message))).size).toBe(1);
+        expect(wrong.body.message).toBe('Invalid or expired code');
+        await request(http()).post('/review/api/login/2fa').send({ challenge: 'short', code: '123456' }).expect(400);
+        await request(http()).post('/review/api/login/2fa').send({ code: '123456' }).expect(400);
+      });
+
+      it('accepts a code for the previous or next step (clock drift) but not older ones', async () => {
+        const u = await enrolled();
+        for (const [delta, ok] of [[-1, true], [1, true]] as const) {
+          advance(2); // far enough that the earlier code's step is behind us
+          const c = (await login(u.email).expect(200)).body.challenge;
+          await second(c, codeFor(u.secret, delta)).expect(ok ? 200 : 401);
+        }
+        advance(3);
+        const c = (await login(u.email).expect(200)).body.challenge;
+        await second(c, codeFor(u.secret, -2)).expect(401);
+        await second(c, codeFor(u.secret, 2)).expect(401);
+      });
+
+      it('refuses a code that was already used, even in a new sign-in, and an older one', async () => {
+        const u = await enrolled();
+        advance(1);
+        const code = codeFor(u.secret);
+        await second((await login(u.email).expect(200)).body.challenge, code).expect(200);
+        await second((await login(u.email).expect(200)).body.challenge, code).expect(401); // replay
+        await second((await login(u.email).expect(200)).body.challenge, codeFor(u.secret, -1)).expect(401); // an earlier step
+      });
+
+      it('lets only one of several parallel attempts with the same code through', async () => {
+        const u = await enrolled();
+        advance(1);
+        const challenges = await Promise.all([1, 2, 3, 4].map(async () => (await login(u.email).expect(200)).body.challenge as string));
+        const code = codeFor(u.secret);
+        const results = await Promise.all(challenges.map((c) => second(c, code)));
+        expect(results.filter((x) => x.status === 200)).toHaveLength(1);
+      });
+
+      it('spends a challenge once, and allows only a few guesses on it', async () => {
+        const u = await enrolled();
+        advance(1);
+        const c = (await login(u.email).expect(200)).body.challenge;
+        await second(c, codeFor(u.secret)).expect(200);
+        await second(c, codeFor(u.secret, 1)).expect(401); // already used
+
+        advance(1);
+        const c2 = (await login(u.email).expect(200)).body.challenge;
+        for (let i = 0; i < 3; i++) await second(c2, '000000').expect(401);
+        // Still the same challenge: the right code works while guesses remain
+        await second(c2, codeFor(u.secret)).expect(200);
+      });
+
+      it('locks the account after repeated wrong codes, even for the right password and code', async () => {
+        const u = await enrolled();
+        advance(1);
+        for (let i = 0; i < 5; i++) {
+          const c = (await login(u.email).expect(200)).body.challenge;
+          await second(c, '000000').expect(401);
+        }
+        expect((await prisma.reviewer.findUniqueOrThrow({ where: { id: u.id } })).lockedUntil).not.toBeNull();
+        await login(u.email).expect(401); // locked: even the right password is refused
+        await prisma.reviewer.update({ where: { id: u.id }, data: { lockedUntil: null, failedLogins: 0 } });
+        advance(1);
+        const c = (await login(u.email).expect(200)).body.challenge;
+        await second(c, codeFor(u.secret)).expect(200);
+      });
+
+      it('a challenge stops working once the account is locked or disabled', async () => {
+        const u = await enrolled();
+        advance(1);
+        const c = (await login(u.email).expect(200)).body.challenge;
+        await prisma.reviewer.update({ where: { id: u.id }, data: { disabled: true } });
+        await second(c, codeFor(u.secret)).expect(401);
+        await prisma.reviewer.update({ where: { id: u.id }, data: { disabled: false } });
+      });
+
+      it('refuses a challenge that expired while the code was being checked', async () => {
+        const u = await enrolled();
+        advance(1);
+        const c = (await login(u.email).expect(200)).body.challenge as string;
+        const real = StorageService.prototype.openSecret;
+        // Verification takes "a long time" (a slow key service): the challenge runs out in the middle of it
+        const spy = jest.spyOn(StorageService.prototype, 'openSecret').mockImplementation(async function (this: StorageService, sealed: string, owner: string) {
+          await prisma.loginChallenge.updateMany({ where: { tokenHash: sha256(c) }, data: { expiresAt: new Date(realNow() - 1000) } });
+          return real.call(this, sealed, owner);
+        });
+        try {
+          const res = await second(c, codeFor(u.secret)).expect(401);
+          expect(res.headers['set-cookie']).toBeUndefined();
+          expect(res.body.message).toBe('Invalid or expired code');
+        } finally {
+          spy.mockRestore();
+        }
+        expect(await prisma.reviewerSession.count({ where: { reviewerId: u.id, id: { not: undefined } } })).toBeGreaterThanOrEqual(1); // only the enrolment session exists; none was opened
+      });
+
+      it('handles parallel completions of one challenge without a server error: one session, the rest refused', async () => {
+        const u = await enrolled();
+        advance(1);
+        const c = (await login(u.email).expect(200)).body.challenge as string;
+        const code = codeFor(u.secret);
+        const before = await prisma.reviewerSession.count({ where: { reviewerId: u.id } });
+        // Four tries: within the five a challenge allows, so the cap cannot be what refuses the winner
+        const results = await Promise.all(Array.from({ length: 4 }, () => second(c, code)));
+        expect(results.map((r) => r.status).filter((st) => st !== 200 && st !== 401)).toEqual([]); // no 500s
+        expect(results.filter((r) => r.status === 200)).toHaveLength(1);
+        expect(await prisma.reviewerSession.count({ where: { reviewerId: u.id } })).toBe(before + 1);
+        expect(await prisma.loginChallenge.count({ where: { tokenHash: sha256(c) } })).toBe(0);
+      });
+
+      it('refuses a challenge deleted by cleanup between steps with the usual message', async () => {
+        const u = await enrolled();
+        advance(1);
+        const c = (await login(u.email).expect(200)).body.challenge as string;
+        await prisma.loginChallenge.deleteMany({ where: { tokenHash: sha256(c) } });
+        const res = await second(c, codeFor(u.secret)).expect(401);
+        expect(res.body.message).toBe('Invalid or expired code');
+      });
+
+      it('refuses cross-origin requests on every new step', async () => {
+        const u = await enrolled();
+        const evil = { Origin: 'https://evil.example' };
+        await request(http()).post('/review/api/login/2fa').set(evil).send({ challenge: 'x'.repeat(43), code: '123456' }).expect(403);
+        for (const path of ['setup', 'enable', 'disable', 'recovery-codes']) {
+          await request(http()).post(`/review/api/2fa/${path}`).set('Cookie', u.cookie).set(evil).send({ password: PW, code: '123456' }).expect(403);
+        }
+      });
+
+    });
+
+    describe('guessing from inside a session', () => {
+      it('stops at the same lockout as signing in', async () => {
+        const u = await enrolled();
+        const manage = (path: string, body: object) => request(http()).post(`/review/api/2fa/${path}`).set('Cookie', u.cookie).send(body);
+        advance(1);
+        // Five wrong passwords on a sensitive action lock the account...
+        for (let i = 0; i < 5; i++) await manage('disable', { password: 'wrong-password-123', code: '000000' }).expect(401);
+        expect((await prisma.reviewer.findUniqueOrThrow({ where: { id: u.id } })).lockedUntil).not.toBeNull();
+        // ...and from then on the right password and code are refused too, on every management route
+        const good = { password: PW, code: codeFor(u.secret) };
+        for (const [path, body] of [['disable', good], ['recovery-codes', good], ['setup', { password: PW }]] as const) {
+          const res = await manage(path, body).expect(429);
+          expect(res.body.message).toContain('Try again later');
+        }
+        expect((await prisma.reviewer.findUniqueOrThrow({ where: { id: u.id } })).totpEnabledAt).not.toBeNull(); // nothing changed
+        await prisma.reviewer.update({ where: { id: u.id }, data: { lockedUntil: null, failedLogins: 0 } });
+        advance(1);
+        await manage('recovery-codes', { password: PW, code: codeFor(u.secret) }).expect(200); // unlocked: works again
+      });
+
+      it('also refuses confirming a new setup while locked', async () => {
+        const r = await reviewer();
+        const cookie = await sessionFor(r.email);
+        const setup = (await request(http()).post('/review/api/2fa/setup').set('Cookie', cookie).send({ password: PW }).expect(200)).body;
+        await prisma.reviewer.update({ where: { id: r.id }, data: { lockedUntil: new Date(Date.now() + 60_000) } });
+        await request(http()).post('/review/api/2fa/enable').set('Cookie', cookie).send({ code: codeFor(setup.secret) }).expect(429);
+        expect((await prisma.reviewer.findUniqueOrThrow({ where: { id: r.id } })).totpEnabledAt).toBeNull();
+      });
+    });
+
+    describe('recovery codes', () => {
+      it('sign in once each, in any case and spacing, and then are spent', async () => {
+        const u = await enrolled();
+        const code = u.recovery[0];
+        const c1 = (await login(u.email).expect(200)).body.challenge;
+        await second(c1, code.toLowerCase().replace('-', ' ')).expect(200);
+        const c2 = (await login(u.email).expect(200)).body.challenge;
+        await second(c2, code).expect(401); // spent
+        // Two codes are spent now: the first above, and the second to open this session
+        expect((await request(http()).get('/review/api/2fa').set('Cookie', await sessionAfter(u, 1)).expect(200)).body.recoveryCodesLeft).toBe(8);
+      });
+
+      async function sessionAfter(u: { email: string; recovery: string[] }, i: number) {
+        const c = (await login(u.email).expect(200)).body.challenge;
+        return cookieOf(await second(c, u.recovery[i]).expect(200));
+      }
+
+      it('let only one of several parallel uses of the same code through', async () => {
+        const u = await enrolled();
+        const challenges = await Promise.all([1, 2, 3, 4].map(async () => (await login(u.email).expect(200)).body.challenge as string));
+        const results = await Promise.all(challenges.map((c) => second(c, u.recovery[3])));
+        expect(results.filter((x) => x.status === 200)).toHaveLength(1);
+      });
+
+      it('are replaced as a set by new ones, which needs the password and a current code', async () => {
+        const u = await enrolled();
+        const post = (body: object) => request(http()).post('/review/api/2fa/recovery-codes').set('Cookie', u.cookie).send(body);
+        await post({ password: 'wrong-password-123', code: codeFor(u.secret, 1) }).expect(401);
+        advance(1);
+        await post({ password: PW, code: '000000' }).expect(401);
+        const fresh = (await post({ password: PW, code: codeFor(u.secret) }).expect(200)).body.recoveryCodes as string[];
+        expect(fresh).toHaveLength(10);
+        const c = (await login(u.email).expect(200)).body.challenge;
+        await second(c, u.recovery[5]).expect(401); // the old set is dead
+        const c2 = (await login(u.email).expect(200)).body.challenge;
+        await second(c2, fresh[0]).expect(200);
+      });
+    });
+
+    describe('turning it off', () => {
+      it('needs the password and a code, then returns to password-only sign-in and removes the secret and recovery codes', async () => {
+        const u = await enrolled();
+        const other = await signIn(u);
+        const off = (body: object) => request(http()).post('/review/api/2fa/disable').set('Cookie', u.cookie).send(body);
+        await off({ password: 'wrong-password-123', code: codeFor(u.secret, 1) }).expect(401);
+        advance(1);
+        await off({ password: PW, code: '000000' }).expect(401);
+        advance(1);
+        await off({ password: PW, code: codeFor(u.secret) }).expect(204);
+        const row = await prisma.reviewer.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row).toMatchObject({ totpSecretSealed: null, totpEnabledAt: null, totpLastStep: null });
+        expect(await prisma.recoveryCode.count({ where: { reviewerId: u.id } })).toBe(0);
+        const res = await login(u.email).expect(200);
+        expect(res.body.twoFactorRequired).toBeUndefined();
+        expect(res.headers['set-cookie']).toBeDefined();
+        await request(http()).get('/review/api/me').set('Cookie', other).expect(401); // other sessions ended
+      });
+
+      it('can use a recovery code to turn it off', async () => {
+        const u = await enrolled();
+        await request(http()).post('/review/api/2fa/disable').set('Cookie', u.cookie).send({ password: PW, code: u.recovery[0] }).expect(204);
+      });
+
+      it('is refused where the organisation requires two-factor sign-in', async () => {
+        const u = await enrolled(requiredTenantId);
+        advance(1);
+        const res = await request(http()).post('/review/api/2fa/disable').set('Cookie', u.cookie).send({ password: PW, code: codeFor(u.secret) }).expect(403);
+        expect(res.body.message).toContain('requires');
+        expect((await prisma.reviewer.findUniqueOrThrow({ where: { id: u.id } })).totpEnabledAt).not.toBeNull();
+      });
+    });
+
+    describe('when the organisation requires it', () => {
+      it('lets a reviewer without it sign in, but only reach the setup screens until it is on', async () => {
+        const r = await reviewer(requiredTenantId);
+        const res = await login(r.email).expect(200);
+        expect(res.body.twoFactorSetupRequired).toBe(true);
+        const cookie = cookieOf(res);
+        expect((await request(http()).get('/review/api/me').set('Cookie', cookie).expect(200)).body.twoFactorSetupRequired).toBe(true);
+        const id = '00000000-0000-4000-8000-000000000000';
+        for (const [method, path] of [['get', '/review/api/sessions'], ['get', `/review/api/sessions/${id}`], ['get', `/review/api/sessions/${id}/documents/SELFIE`], ['post', `/review/api/sessions/${id}/decision`]] as const) {
+          const blocked = await request(http())[method](path).set('Cookie', cookie).send({ decision: 'APPROVED' }).expect(403);
+          expect(blocked.body.code).toBe('two_factor_setup_required');
+        }
+        // The way out stays open
+        const setup = (await request(http()).post('/review/api/2fa/setup').set('Cookie', cookie).send({ password: PW }).expect(200)).body;
+        await request(http()).post('/review/api/2fa/enable').set('Cookie', cookie).send({ code: codeFor(setup.secret) }).expect(200);
+        await request(http()).get('/review/api/sessions').set('Cookie', cookie).expect(200);
+        await request(http()).post('/review/api/logout').set('Cookie', cookie).expect(204);
+      });
+
+      it('applies at once to reviewers already signed in when the requirement is switched on or off', async () => {
+        const r = await reviewer(tenantId2);
+        const cookie = await sessionFor(r.email);
+        await request(http()).get('/review/api/sessions').set('Cookie', cookie).expect(200);
+        await prisma.tenant.update({ where: { id: tenantId2 }, data: { requireReviewerTwoFactor: true } });
+        try {
+          await request(http()).get('/review/api/sessions').set('Cookie', cookie).expect(403);
+        } finally {
+          await prisma.tenant.update({ where: { id: tenantId2 }, data: { requireReviewerTwoFactor: false } });
+        }
+        await request(http()).get('/review/api/sessions').set('Cookie', cookie).expect(200);
+      });
+
+      it('does not hold back a reviewer who has it', async () => {
+        const u = await enrolled(requiredTenantId);
+        advance(1);
+        await request(http()).get('/review/api/sessions').set('Cookie', u.cookie).expect(200);
+        expect((await request(http()).get('/review/api/2fa').set('Cookie', u.cookie).expect(200)).body.required).toBe(true);
+      });
+    });
+
+    describe('the sealed secret', () => {
+      it('cannot be moved to another reviewer: it fails as a refused code, not a server error', async () => {
+        const a = await enrolled();
+        const b = await reviewer();
+        const sealedA = (await prisma.reviewer.findUniqueOrThrow({ where: { id: a.id } })).totpSecretSealed;
+        await prisma.reviewer.update({ where: { id: b.id }, data: { totpSecretSealed: sealedA, totpEnabledAt: new Date() } });
+        const err = jest.spyOn(Logger.prototype, 'error').mockImplementation();
+        try {
+          advance(1);
+          const c = (await login(b.email).expect(200)).body.challenge;
+          await second(c, codeFor(a.secret)).expect(401); // A's secret, B's account: the binding refuses it
+          expect(err).toHaveBeenCalledWith(expect.stringContaining(b.id));
+          expect(JSON.stringify(err.mock.calls)).not.toContain(a.secret);
+        } finally {
+          err.mockRestore();
+        }
+      });
+
+      it('answers 503, not "wrong code", while the key service is down', async () => {
+        const u = await enrolled();
+        advance(1);
+        const c = (await login(u.email).expect(200)).body.challenge;
+        const spy = jest.spyOn(StorageService.prototype, 'openSecret').mockRejectedValue(new KeyUnavailableError());
+        try {
+          await second(c, codeFor(u.secret)).expect(503);
+        } finally {
+          spy.mockRestore();
+        }
+        await second(c, codeFor(u.secret)).expect(200); // and it works once the key service is back
+      });
+    });
+
+    describe('moving to KMS', () => {
+      const masterKey = () => Buffer.from(process.env.STORAGE_ENCRYPTION_KEY!, 'base64');
+      const formatOfColumn = (v: string | null) => (v ? Buffer.from(v, 'base64').subarray(0, 4).toString() : null);
+
+      it('re-seals reviewers\' authenticator secrets with the documents, so removing the old key does not lock them out', async () => {
+        const kmsTenant = (await prisma.tenant.create({ data: { name: `kms-${suffix}-a`, apiKeyHash: sha256(`vk_kms_a_${suffix}`), webhookSecret: 'x' } })).id;
+        const u = await enrolled(kmsTenant);
+        const storage = app.get(StorageService);
+        // As sealed before the key provider existed: the original format, nothing bound
+        const secret = base32Decode(u.secret);
+        await prisma.reviewer.update({ where: { id: u.id }, data: { totpSecretSealed: legacyEncrypt(masterKey(), secret).toString('base64') } });
+        expect(formatOfColumn((await prisma.reviewer.findUniqueOrThrow({ where: { id: u.id } })).totpSecretSealed)).not.toBe('VSE0');
+
+        const dry = await reencryptAll(prisma, storage, { dryRun: true, tenantId: kmsTenant });
+        expect(dry.secretsRewrapped).toBe(1);
+        expect(formatOfColumn((await prisma.reviewer.findUniqueOrThrow({ where: { id: u.id } })).totpSecretSealed)).not.toBe('VSE0'); // a dry run writes nothing
+
+        const report = await reencryptAll(prisma, storage, { tenantId: kmsTenant });
+        expect(report.failed).toBe(0);
+        expect(report.secretsRewrapped).toBe(1);
+        const after = (await prisma.reviewer.findUniqueOrThrow({ where: { id: u.id } })).totpSecretSealed;
+        expect(formatOfColumn(after)).toBe('VSE0'); // bound to its reviewer now
+        expect(await storage.openSecret(after!, u.id)).toEqual(secret); // the same secret, so codes still work
+        advance(1);
+        const c = (await login(u.email).expect(200)).body.challenge;
+        await second(c, codeFor(u.secret)).expect(200);
+        expect((await reencryptAll(prisma, storage, { tenantId: kmsTenant })).secretsRewrapped).toBe(0); // idempotent
+      });
+
+      it('leaves a reviewer alone who turned two-factor off while the migration was running', async () => {
+        const kmsTenant = (await prisma.tenant.create({ data: { name: `kms-${suffix}-b`, apiKeyHash: sha256(`vk_kms_b_${suffix}`), webhookSecret: 'x' } })).id;
+        const u = await enrolled(kmsTenant);
+        const storage = app.get(StorageService);
+        await prisma.reviewer.update({ where: { id: u.id }, data: { totpSecretSealed: legacyEncrypt(masterKey(), base32Decode(u.secret)).toString('base64') } });
+        const real = prisma.reviewer.findMany.bind(prisma.reviewer);
+        const spy = jest.spyOn(prisma.reviewer, 'findMany').mockImplementation(((args: unknown) =>
+          real(args as never).then(async (rows: { id: string }[]) => {
+            if (rows.some((r) => r.id === u.id)) await prisma.reviewer.update({ where: { id: u.id }, data: { totpSecretSealed: null, totpEnabledAt: null } });
+            return rows;
+          })) as never);
+        try {
+          await reencryptAll(prisma, storage, { tenantId: kmsTenant });
+        } finally {
+          spy.mockRestore();
+        }
+        expect(await prisma.reviewer.findUniqueOrThrow({ where: { id: u.id } })).toMatchObject({ totpSecretSealed: null, totpEnabledAt: null }); // not resurrected
+      });
+    });
+
+    describe('operator tools', () => {
+      const run = (args: string[]) =>
+        new Promise<{ code: number }>((resolve) => {
+          execFile('node', ['-r', 'ts-node/register', 'scripts/reviewer.ts', ...args], { env: process.env, cwd: process.cwd(), timeout: 60_000 }, (error) =>
+            resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0 }),
+          );
+        });
+
+      it('reset-2fa clears a lost authenticator, ends sessions and lets them sign in with just a password', async () => {
+        const u = await enrolled();
+        expect((await run(['reset-2fa', u.email])).code).toBe(0);
+        expect(await prisma.recoveryCode.count({ where: { reviewerId: u.id } })).toBe(0);
+        expect(await prisma.reviewerSession.count({ where: { reviewerId: u.id } })).toBe(0);
+        const row = await prisma.reviewer.findUniqueOrThrow({ where: { id: u.id } });
+        expect(row).toMatchObject({ totpSecretSealed: null, totpEnabledAt: null });
+        const res = await login(u.email).expect(200);
+        expect(res.body.twoFactorRequired).toBeUndefined();
+        expect((await run(['reset-2fa', `nobody-${suffix}@example.test`])).code).toBe(1);
+        expect((await run(['reset-2fa'])).code).toBe(1);
+      }, 120_000);
+    });
+
+    // Last on purpose: once the limiter has blocked this route it stays blocked for a minute
+    describe('rate limiting', () => {
+      it('rate-limits the second step like the first', async () => {
+        const normal = process.env.LOGIN_RATE_LIMIT;
+        process.env.LOGIN_RATE_LIMIT = '2';
+        try {
+          const codes: number[] = [];
+          for (let i = 0; i < 6; i++) codes.push((await second('y'.repeat(43), '123456').set('X-Forwarded-For', '203.0.113.20')).status);
+          expect(codes).toContain(429);
+        } finally {
+          process.env.LOGIN_RATE_LIMIT = normal;
+        }
+      });
     });
   });
 });

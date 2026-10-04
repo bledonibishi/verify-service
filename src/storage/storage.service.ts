@@ -27,6 +27,10 @@ export function sealContext(key: string): SealContext {
   };
 }
 
+function secretContext(ownerId: string): SealContext {
+  return { aad: `totp:${ownerId}`, kmsContext: { app: 'verify-service', purpose: 'totp', owner: ownerId } };
+}
+
 /**
  * Encrypts every object before it leaves the process and hands the ciphertext to a store: local
  * disk (development) or S3-compatible object storage (`STORAGE_DRIVER=s3`). The key is either the
@@ -124,6 +128,30 @@ export class StorageService implements DocumentStorage {
       serverSideEncryption: sse as 'AES256' | 'aws:kms' | 'none',
       kmsKeyId: config.get<string>('S3_KMS_KEY_ID'),
     });
+  }
+
+  /**
+   * Seals a small secret (for example a reviewer's authenticator key) with the same key provider as
+   * the documents, bound to its owner, and returns text that can sit in a database column.
+   */
+  async sealSecret(plain: Buffer, ownerId: string): Promise<string> {
+    return (await this.keys.seal(plain, secretContext(ownerId))).toString('base64');
+  }
+
+  async openSecret(sealed: string, ownerId: string): Promise<Buffer> {
+    return this.keys.open(Buffer.from(sealed, 'base64'), secretContext(ownerId));
+  }
+
+  /**
+   * Re-seals a secret into the current format if it is not already, returning the new value (or null
+   * when it is already current). Used by the migration so removing the old master key does not strand
+   * secrets that still depend on it.
+   */
+  async resealSecret(sealed: string, ownerId: string): Promise<string | null> {
+    const raw = Buffer.from(sealed, 'base64');
+    const ctx = secretContext(ownerId);
+    if (await this.keys.isCurrent(raw, ctx)) return null;
+    return (await this.keys.seal(await this.keys.open(raw, ctx), ctx)).toString('base64');
   }
 
   /** Which kind of key protects new objects. */

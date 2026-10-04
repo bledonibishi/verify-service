@@ -43,6 +43,9 @@ model Tenant {
   reviewers     Reviewer[]
   webhookEvents WebhookEvent[]
   usageEvents   UsageEvent[]
+  // When true, every reviewer of this tenant must have two-factor sign-in: one who has not set it up
+  // can only reach the setup screens until they do
+  requireReviewerTwoFactor Boolean @default(false) @map("require_reviewer_two_factor")
   // Cost protection: once this many verifications are billable or in flight in a UTC month,
   // creating another session answers 429. Null means no cap.
   monthlyVerificationCap Int? @map("monthly_verification_cap")
@@ -214,6 +217,14 @@ model Reviewer {
   createdAt      DateTime          @default(now()) @map("created_at")
   sessions       ReviewerSession[]
   decisions      Session[]
+  // Authenticator secret, sealed with the storage key provider (never stored in the clear). Present
+  // with totpEnabledAt null = set up but not yet confirmed with a code.
+  totpSecretSealed String?         @map("totp_secret_sealed")
+  totpEnabledAt    DateTime?       @map("totp_enabled_at")
+  // The last 30-second step a code was accepted for; a code for that step or earlier is refused (replay)
+  totpLastStep     Int?            @map("totp_last_step")
+  recoveryCodes    RecoveryCode[]
+  challenges       LoginChallenge[]
 
   @@index([tenantId])
   @@map("reviewers")
@@ -312,4 +323,32 @@ model UsageEvent {
   @@unique([sessionId, kind])
   @@index([tenantId, occurredAt])
   @@map("usage_events")
+}
+
+// Single-use codes for a lost authenticator. Only a hash is stored.
+model RecoveryCode {
+  id         String    @id @default(uuid())
+  reviewerId String    @map("reviewer_id")
+  reviewer   Reviewer  @relation(fields: [reviewerId], references: [id], onDelete: Cascade)
+  codeHash   String    @map("code_hash")
+  usedAt     DateTime? @map("used_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([reviewerId])
+  @@map("recovery_codes")
+}
+
+// Between the password step and the second factor: proves the password was right, grants nothing.
+// Short-lived, a handful of attempts, only its hash is stored.
+model LoginChallenge {
+  id         String   @id @default(uuid())
+  reviewerId String   @map("reviewer_id")
+  reviewer   Reviewer @relation(fields: [reviewerId], references: [id], onDelete: Cascade)
+  tokenHash  String   @unique @map("token_hash")
+  expiresAt  DateTime @map("expires_at")
+  attempts   Int      @default(0)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([reviewerId])
+  @@map("login_challenges")
 }

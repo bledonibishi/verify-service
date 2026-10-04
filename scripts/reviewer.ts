@@ -5,6 +5,7 @@
  *   pnpm reviewer reset <email>                      new one-time password, signs the person out
  *   pnpm reviewer disable <email>                    blocks login and ends their sessions
  *   pnpm reviewer enable <email>
+ *   pnpm reviewer reset-2fa <email>                  turns off their two-factor sign-in (lost phone), ends their sessions
  *
  * A password can be supplied with REVIEWER_PASSWORD (min 12 characters) instead of generating one.
  */
@@ -13,7 +14,7 @@ import { randomBytes } from 'crypto';
 import { MIN_PASSWORD_LENGTH, hashPassword } from '../src/review/password';
 
 const usage = () => {
-  console.error('Usage: pnpm reviewer create <tenantId> <email> [name] | reset <email> | disable <email> | enable <email>');
+  console.error('Usage: pnpm reviewer create <tenantId> <email> [name] | reset <email> | disable <email> | enable <email> | reset-2fa <email>');
   process.exit(1);
 };
 
@@ -58,6 +59,17 @@ async function main() {
       await prisma.reviewerSession.deleteMany({ where: { reviewerId: reviewer.id } });
       console.log(`Password reset for ${reviewer.email}; existing sign-ins ended.`);
       if (generated) console.log(`Password: ${password}`);
+    } else if (command === 'reset-2fa') {
+      const [rawEmail] = args;
+      if (!rawEmail) usage();
+      const reviewer = await prisma.reviewer.update({
+        where: { email: rawEmail.trim().toLowerCase() },
+        data: { totpSecretSealed: null, totpEnabledAt: null, totpLastStep: null, failedLogins: 0, lockedUntil: null },
+      });
+      await prisma.recoveryCode.deleteMany({ where: { reviewerId: reviewer.id } });
+      await prisma.loginChallenge.deleteMany({ where: { reviewerId: reviewer.id } });
+      await prisma.reviewerSession.deleteMany({ where: { reviewerId: reviewer.id } });
+      console.log(`Two-factor sign-in turned off for ${reviewer.email}; their sessions ended. If their organisation requires it, they must set it up again at the next sign-in.`);
     } else if (command === 'disable' || command === 'enable') {
       const [rawEmail] = args;
       if (!rawEmail) usage();

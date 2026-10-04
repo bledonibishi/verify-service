@@ -1,4 +1,5 @@
-import { CanActivate, ExecutionContext, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { CanActivate, ExecutionContext, ForbiddenException, Injectable, SetMetadata, UnauthorizedException } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { Reviewer } from '@prisma/client';
 import { COOKIE_NAME, ReviewAuthService } from './auth.service';
@@ -7,7 +8,13 @@ export interface ReviewRequest {
   method: string;
   headers: Record<string, string | string[] | undefined>;
   reviewer?: Reviewer;
+  sessionId?: string;
+  tenantRequires?: boolean;
 }
+
+const ALLOW_LIMITED = 'review:allow-limited';
+/** Marks a route a reviewer may use before they have set up the two-factor sign-in their organisation requires. */
+export const AllowLimited = () => SetMetadata(ALLOW_LIMITED, true);
 
 export function readCookie(header: string | string[] | undefined, name: string): string | null {
   const raw = Array.isArray(header) ? header.join(';') : header;
@@ -34,15 +41,21 @@ export class ReviewAuthGuard implements CanActivate {
   constructor(
     private readonly auth: ReviewAuthService,
     private readonly config: ConfigService,
+    private readonly reflector: Reflector,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const req = context.switchToHttp().getRequest<ReviewRequest>();
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) this.checkOrigin(req);
     const token = readCookie(req.headers.cookie, COOKIE_NAME);
-    const reviewer = token ? await this.auth.authenticate(token) : null;
-    if (!reviewer) throw new UnauthorizedException('Not signed in');
-    req.reviewer = reviewer;
+    const found = token ? await this.auth.authenticate(token) : null;
+    if (!found) throw new UnauthorizedException('Not signed in');
+    if (found.limited && !this.reflector.getAllAndOverride<boolean>(ALLOW_LIMITED, [context.getHandler(), context.getClass()])) {
+      throw new ForbiddenException({ statusCode: 403, error: 'Forbidden', message: 'Set up two-factor sign-in to continue', code: 'two_factor_setup_required' });
+    }
+    req.reviewer = found.reviewer;
+    req.sessionId = found.sessionId;
+    req.tenantRequires = found.tenantRequires;
     return true;
   }
 
