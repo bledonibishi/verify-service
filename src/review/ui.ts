@@ -75,6 +75,7 @@ export const APP_JS = `
     ID_FRONT_MISSING: 'ID front was not uploaded',
     SELFIE_MISSING: 'Selfie was not uploaded',
     LICENCE_FRONT_MISSING: 'Driving licence front was not uploaded',
+    LICENCE_NOT_CHECKED: 'A driving licence was required but could not be checked',
     LICENCE_NOT_READABLE: 'Nothing could be read from the driving licence',
     LICENCE_FIELDS_INCOMPLETE: 'Some driving licence fields could not be read',
     LICENCE_OCR_REPAIRED: 'Driving licence characters had to be corrected after text recognition',

@@ -47,7 +47,9 @@ const digits = (s: string): { value: string; repaired: boolean } => {
   return { value, repaired };
 };
 
-const DATE = /([0-9OoIlSBZ]{1,2})\s?[./-]\s?([0-9OoIlSBZ]{1,2})\s?[./-]\s?([0-9OoIlSBZ]{4})/;
+// Anchored: a date is a whole token, never a slice of a longer run of digits
+const D = '0-9OoIlLSBZ';
+const DATE = new RegExp(`(?<![${D}])([${D}]{1,2})\\s?[./-]\\s?([${D}]{1,2})\\s?[./-]\\s?([${D}]{4})(?![${D}])`);
 
 function parseDate(text: string): { iso: string; repaired: boolean } | null {
   const m = text.match(DATE);
@@ -63,8 +65,13 @@ function parseDate(text: string): { iso: string; repaired: boolean } | null {
 const CATEGORY = /^(AM|A1|A2|A|B1|BE|B|C1E|C1|CE|C|D1E|D1|DE|D|F|G|H|K|T)$/;
 
 function parseName(raw: string): string | undefined {
-  // First line only; letters (including Albanian ë/ç), spaces, hyphens and apostrophes
-  const cleaned = normalizeName(raw.split('\n')[0]);
+  // First line only. Accept letters (Latin, including Albanian ë/ç), spaces, hyphens and apostrophes
+  // and nothing else: digits or stray punctuation mean OCR damage, which must not be silently
+  // dropped ("TESTI123" is not "TESTI"), so the field counts as unreadable.
+  const line = raw.split('\n')[0].trim();
+  const folded = line.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  if (!/^[A-Za-z][A-Za-z '\-]{1,60}$/.test(folded)) return undefined;
+  const cleaned = normalizeName(line);
   return /^[A-Z][A-Z ]{1,60}$/.test(cleaned) ? cleaned : undefined;
 }
 
@@ -105,9 +112,11 @@ export function parseLicenceFields(ocrText: string): LicenceParse {
 
   const v4d = values.get('4d');
   if (v4d) {
-    const m = v4d.match(/[0-9OoIlSBZ]{10}/);
-    if (m) {
-      const d = digits(m[0]);
+    // The whole field must be exactly ten digits (or look-alikes): an extra or missing digit is
+    // damage, not something to trim until it fits.
+    const token = v4d.split(/\s+/)[0] ?? '';
+    if (/^[0-9OoIlLSBZ]{10}$/.test(token)) {
+      const d = digits(token);
       if (/^\d{10}$/.test(d.value)) {
         fields.personalNumber = d.value;
         repaired ||= d.repaired;
@@ -118,11 +127,12 @@ export function parseLicenceFields(ocrText: string): LicenceParse {
 
   const v5 = values.get('5');
   if (v5) {
-    const m = v5.toUpperCase().match(/\b([A-Z]{1,3})\s?([0-9OIlLSB]{5,10})\b/);
+    // Observed format: "DL" + digits. Anything else is not accepted as a licence number.
+    const m = v5.toUpperCase().match(/^(DL)\s?([0-9OIlLSB]{5,10})(?![0-9A-Z])/);
     if (m) {
       const d = digits(m[2]);
       if (/^\d{5,10}$/.test(d.value)) {
-        fields.licenceNumber = `${m[1]}${d.value}`;
+        fields.licenceNumber = `DL${d.value}`;
         repaired ||= d.repaired;
         found.push('5');
       }

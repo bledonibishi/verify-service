@@ -19,27 +19,31 @@ export interface LicenceOutcome {
   issueCodes: string[];
 }
 
-const YEAR_MS = 365.25 * 86_400_000;
-const addYears = (iso: string, years: number) => new Date(Date.parse(iso) + years * YEAR_MS);
+/** Licence dates are printed in local (Kosovo, CET) calendar days, so "today" is the local day. */
+const localToday = (now: Date): string => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Belgrade' }).format(now);
 
-/** Dates that cannot belong to a real licence, whatever the holder. */
-function datesPlausible(f: LicenceFields, now: Date): boolean | null {
+/** ISO date plus whole calendar years/months (29 February moves to 1 March in a common year). */
+function addCalendar(iso: string, years: number, months = 0): string {
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(Date.UTC(y + years, m - 1 + months, d)).toISOString().slice(0, 10);
+}
+
+/** Dates that cannot belong to a real licence, whatever the holder. ISO dates compare as strings. */
+function datesPlausible(f: LicenceFields, today: string): boolean | null {
   if (!f.issueDate || !f.expiryDate) return null;
-  const issue = Date.parse(f.issueDate);
-  const expiry = Date.parse(f.expiryDate);
-  if (issue > now.getTime() + 86_400_000) return false; // issued in the future
-  if (expiry <= issue) return false;
-  const years = (expiry - issue) / YEAR_MS;
-  if (years < 0.5 || years > 15.5) return false; // licences in the samples were valid for 10 years
-  if (f.birthDate && Date.parse(f.birthDate) > addYears(f.issueDate, -15).getTime()) return false; // holder under 15 at issue
+  if (f.issueDate > today) return false; // issued in the future, not even by a day
+  if (f.expiryDate <= f.issueDate) return false;
+  if (f.expiryDate < addCalendar(f.issueDate, 0, 6)) return false; // under six months
+  if (f.expiryDate > addCalendar(f.issueDate, 15)) return false; // over 15 years (the samples show ten)
+  if (f.birthDate && addCalendar(f.birthDate, 15) > f.issueDate) return false; // holder under 15 on the issue date
   return true;
 }
 
+/** The licence's given names must be the leading part of the ID's: it may omit later names, never add any. */
 function matchGiven(licence: string, mrz: string): boolean {
-  const a = normalizeName(licence).split(' ');
-  const b = normalizeName(mrz).split(' ');
-  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
-  return short.every((token, i) => token === long[i]);
+  const l = normalizeName(licence).split(' ');
+  const m = normalizeName(mrz).split(' ');
+  return l.length <= m.length && l.every((token, i) => token === m[i]);
 }
 
 /**
@@ -56,9 +60,10 @@ export function checkLicence(ocrText: string, id: Td1Data | null, now = new Date
   else if (!complete) issueCodes.push('LICENCE_FIELDS_INCOMPLETE');
   if (repaired) issueCodes.push('LICENCE_OCR_REPAIRED');
 
-  const expired = fields.expiryDate ? Date.parse(fields.expiryDate) < Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) : null;
+  const today = localToday(now);
+  const expired = fields.expiryDate ? fields.expiryDate < today : null;
   if (expired) issueCodes.push('LICENCE_EXPIRED');
-  const datesValid = datesPlausible(fields, now);
+  const datesValid = datesPlausible(fields, today);
   if (datesValid === false) issueCodes.push('LICENCE_DATES_IMPLAUSIBLE');
 
   const compare = (have: string | undefined, ok: (idValue: Td1Data) => boolean): Match => (!id || !have ? 'unavailable' : ok(id) ? 'match' : 'mismatch');

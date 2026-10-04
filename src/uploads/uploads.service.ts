@@ -73,6 +73,10 @@ export class UploadsService {
 
   async addDocument(token: string, kind: DocumentKind, data: Buffer) {
     const session = await this.openSession(token);
+    // Data minimisation: a second government document is only taken when the session asked for it
+    if ((kind === DocumentKind.LICENCE_FRONT || kind === DocumentKind.LICENCE_BACK) && !session.requireLicence) {
+      throw new BadRequestException('This session does not take a driving licence');
+    }
     const contentType = detectImageType(data);
     if (!contentType) throw new BadRequestException('File must be a JPEG, PNG or WebP image');
 

@@ -833,6 +833,7 @@ describe('verification flow (e2e)', () => {
       it('lets a session ask for a licence, and rejects a non-boolean flag', async () => {
         const s = await licenceSession('lic-create');
         expect(s.create.requireDrivingLicence).toBe(true);
+        expect((await request(http()).get(`/v1/sessions/${s.id}`).set(auth()).expect(200)).body.requireDrivingLicence).toBe(true);
         await request(http()).post('/v1/sessions').set(auth()).send({ externalRef: 'x', requireDrivingLicence: 'yes' }).expect(400);
         const plain = await request(http()).post('/v1/sessions').set(auth()).send({ externalRef: 'plain' }).expect(201);
         expect(plain.body.requireDrivingLicence).toBe(false);
@@ -871,8 +872,8 @@ describe('verification flow (e2e)', () => {
         const logs = await prisma.auditLog.findMany({ where: { sessionId: s.id } });
         const events = await prisma.webhookEvent.findMany({ where: { sessionId: s.id } });
         const dump = JSON.stringify([body, row, logs, events]);
-        for (const secret of ['TESTI', 'DEMA', '1000000001', 'DL1234567', 'PRISHTINE', '15.05.1990', '1990-05-15']) {
-          if (secret === '1990-05-15') continue; // the tenant's own expected date is part of its request, not read from a document
+        // Includes the ISO date of birth: the tenant's request is not part of any of these outputs
+        for (const secret of ['TESTI', 'DEMA', '1000000001', 'DL1234567', 'PRISHTINE', '15.05.1990', '1990-05-15', '2022-03-12', '2032-03-12']) {
           expect(dump).not.toContain(secret);
         }
       });
@@ -949,13 +950,38 @@ describe('verification flow (e2e)', () => {
         expect(n).toBe(2);
       });
 
-      it('ignores an uploaded licence when the session did not ask for one', async () => {
+      it('does not take a licence from a session that did not ask for one', async () => {
         await setAutoApprove(true);
         const before = licenceCalls;
-        const body = await submitAndSettle(await licenceSession('lic-ignored', { require: false }));
-        expect(body.status).toBe('APPROVED'); // the licence plays no part
+        const s = await licenceSession('lic-unrequested', { require: false, omit: ['LICENCE_FRONT', 'LICENCE_BACK'] });
+        for (const kind of ['LICENCE_FRONT', 'LICENCE_BACK']) {
+          const r = await request(http()).post(`/v1/upload/${s.token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(400);
+          expect(r.body.message).toContain('does not take a driving licence');
+        }
+        // Nothing was stored, and the session is processed exactly as if no licence existed
+        expect(await prisma.document.count({ where: { sessionId: s.id, kind: { in: ['LICENCE_FRONT', 'LICENCE_BACK'] } } })).toBe(0);
+        const body = await submitAndSettle(s);
+        expect(body.status).toBe('APPROVED');
         expect(body.verification.licence).toBeNull();
         expect(licenceCalls - before).toBe(0);
+      });
+
+      it('still records that a licence was required when the pipeline gives up', async () => {
+        await setAutoApprove(true);
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+        licenceImpl = async () => {
+          throw new Error('always broken');
+        };
+        const s = await licenceSession('lic-pipeline-error');
+        try {
+          const body = await submitAndSettle(s);
+          expect(body.status).toBe('NEEDS_REVIEW');
+          expect(body.verification.issues).toEqual(expect.arrayContaining(['PIPELINE_ERROR', 'LICENCE_NOT_CHECKED']));
+          expect(body.verification.licence).toMatchObject({ found: false, fields: [] }); // not null: a licence was required
+          expect(body.requireDrivingLicence).toBe(true);
+        } finally {
+          warn.mockRestore();
+        }
       });
 
       it('stores the licence images with the other documents and erases them all together', async () => {

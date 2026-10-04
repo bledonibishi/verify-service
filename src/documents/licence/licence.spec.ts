@@ -56,6 +56,34 @@ describe('parseLicenceFields', () => {
     expect(parseLicenceFields('random text with 15.05.1990 and 1000000001').found).toEqual([]);
   });
 
+  it('accepts only the documented DL-plus-digits licence number', () => {
+    expect(parseLicenceFields('5. DL1234567').found).toEqual(['5']);
+    expect(parseLicenceFields('5. dl 1234567').found).toEqual(['5']);
+    for (const bad of ['5. XYZ1234567', '5. AB1234567', '5. 1234567', '5. DL123', '5. DL12345678901', '5. DL1234567X']) {
+      expect(parseLicenceFields(bad).found).toEqual([]);
+    }
+  });
+
+  it('treats names with digits or stray punctuation as unreadable, not as the name without them', () => {
+    expect(parseLicenceFields('1. TESTI').fields.surname).toBe('TESTI');
+    expect(parseLicenceFields("1. O'NEILL-SMITH").fields.surname).toBe('O NEILL SMITH');
+    for (const bad of ['1. TESTI123', '1. TE5TI', '1. TESTI|', '1. T', '1. ПРИШТИНА', '1. TESTI, DEMA']) {
+      const r = parseLicenceFields(bad);
+      expect(r.found).toEqual([]);
+      expect(r.fields.surname).toBeUndefined();
+    }
+  });
+
+  it('does not trim a personal number or a date that is longer or shorter than it should be', () => {
+    for (const bad of ['4d. 10000000011', '4d. 100000000', '4d. 1000000001234', '4d. 1000 000001']) {
+      expect(parseLicenceFields(bad).found).toEqual([]);
+    }
+    expect(parseLicenceFields('4d. 1000000001 extra').found).toEqual(['4d']);
+    for (const bad of ['3. 115.05.1990', '3. 15.05.19901', '3. 15.05.199', '3. 1990']) {
+      expect(parseLicenceFields(bad).found).toEqual([]);
+    }
+  });
+
   it('uses the first occurrence of a label', () => {
     expect(parseLicenceFields('1. TESTI\n1. OTHER').fields.surname).toBe('TESTI');
   });
@@ -73,6 +101,15 @@ describe('checkLicence', () => {
     const r = checkLicence(text({ surname: 'Krasniqi', givenNames: 'Arta Ëndërr' }), arta, now);
     expect(r.surname).toBe('match');
     expect(r.givenNames).toBe('match');
+  });
+
+  it('lets a licence omit later given names but never add any', () => {
+    const one = parseTd1(buildTd1({ ...SAMPLE, givenNames: 'DEMA' }), { now }).data!;
+    expect(checkLicence(text({ givenNames: 'DEMA ARTA' }), one, now).givenNames).toBe('mismatch');
+    const two = parseTd1(buildTd1({ ...SAMPLE, givenNames: 'DEMA ARTA' }), { now }).data!;
+    expect(checkLicence(text({ givenNames: 'DEMA' }), two, now).givenNames).toBe('match');
+    expect(checkLicence(text({ givenNames: 'DEMA ARTA' }), two, now).givenNames).toBe('match');
+    expect(checkLicence(text({ givenNames: 'ARTA DEMA' }), two, now).givenNames).toBe('mismatch');
   });
 
   it('accepts a licence that prints only the first given name, but not a different one', () => {
@@ -146,5 +183,47 @@ describe('checkLicence', () => {
   it('exposes no printed value in its result', () => {
     const dump = JSON.stringify(checkLicence(text(), id, now));
     for (const secret of ['TESTI', 'DEMA', '1000000001', '1990', 'DL1234567', 'PRISHTINE']) expect(dump).not.toContain(secret);
+  });
+
+  describe('date boundaries (calendar arithmetic)', () => {
+    const valid = (over: Partial<typeof SAMPLE_LICENCE>, at = now) => checkLicence(text(over), id, at).datesValid;
+
+    it('allows a holder on their fifteenth birthday, not the day before', () => {
+      expect(valid({ birth: '28.02.2005', issue: '28.02.2020', expiry: '28.02.2030' })).toBe(true);
+      expect(valid({ birth: '01.03.2005', issue: '28.02.2020', expiry: '28.02.2030' })).toBe(false);
+      expect(valid({ birth: '01.03.2005', issue: '01.03.2020', expiry: '01.03.2030' })).toBe(true);
+    });
+
+    it('counts a 29 February birthday from 1 March in a common year', () => {
+      expect(valid({ birth: '29.02.2004', issue: '28.02.2019', expiry: '28.02.2029' })).toBe(false);
+      expect(valid({ birth: '29.02.2004', issue: '01.03.2019', expiry: '01.03.2029' })).toBe(true);
+      expect(valid({ birth: '29.02.2004', issue: '29.02.2020', expiry: '28.02.2030' })).toBe(true);
+    });
+
+    it('allows exactly fifteen years of validity and not a day more', () => {
+      expect(valid({ issue: '12.03.2022', expiry: '12.03.2037' })).toBe(true);
+      expect(valid({ issue: '12.03.2022', expiry: '13.03.2037' })).toBe(false);
+      expect(valid({ issue: '29.02.2020', expiry: '01.03.2035' })).toBe(true); // 29 Feb + 15 years = 1 Mar
+      expect(valid({ issue: '29.02.2020', expiry: '02.03.2035' })).toBe(false);
+    });
+
+    it('requires at least six months of validity', () => {
+      expect(valid({ issue: '12.03.2022', expiry: '12.09.2022' })).toBe(true);
+      expect(valid({ issue: '12.03.2022', expiry: '11.09.2022' })).toBe(false);
+    });
+
+    it('rejects a licence issued tomorrow, with no allowance', () => {
+      expect(valid({ issue: '05.10.2026', expiry: '05.10.2036' })).toBe(false); // tomorrow
+      expect(valid({ issue: '04.10.2026', expiry: '04.10.2036' })).toBe(true); // today
+    });
+
+    it('uses the local (Kosovo) calendar day, not UTC, for "today"', () => {
+      // 23:30 UTC on 3 October is already 4 October in Kosovo (CEST, UTC+2)
+      const lateUtc = new Date('2026-10-03T23:30:00Z');
+      expect(valid({ issue: '04.10.2026', expiry: '04.10.2036' }, lateUtc)).toBe(true);
+      expect(valid({ issue: '05.10.2026', expiry: '05.10.2036' }, lateUtc)).toBe(false);
+      expect(checkLicence(text({ issue: '04.10.2016', expiry: '04.10.2026' }), id, lateUtc).expired).toBe(false); // expires today
+      expect(checkLicence(text({ issue: '03.10.2016', expiry: '03.10.2026' }), id, lateUtc).expired).toBe(true); // expired yesterday (local)
+    });
   });
 });

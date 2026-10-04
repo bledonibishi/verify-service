@@ -247,14 +247,20 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
   }
 
   /** Records the result and moves the session, only if it is still PROCESSING. */
-  private async finish(job: ClaimedJob, outcome: CheckOutcome, providers: { ocr: string; face: string | null; liveness: string | null }) {
+  private async finish(job: ClaimedJob, rawOutcome: CheckOutcome, providers: { ocr: string; face: string | null; liveness: string | null }) {
     const committed = await this.prisma.$transaction(async (tx) => {
+      let outcome = rawOutcome;
       // Ownership fence: if our lease lapsed and another worker re-claimed the job, we are stale
       // and must not record anything.
       const owned = await tx.verificationJob.updateMany({ where: this.fence(job), data: { status: 'DONE', lockedUntil: null } });
       if (owned.count === 0) return null;
       const session = await tx.session.findUnique({ where: { id: job.session_id }, include: { tenant: true } });
       if (!session) return null;
+      // Whatever ended the pipeline early (an error, a give-up), a session that required a licence
+      // still records that it was required and not checked, instead of dropping the requirement.
+      if (session.requireLicence && !outcome.licenceRequired) {
+        outcome = withLicence(outcome, null, 'LICENCE_NOT_CHECKED');
+      }
       const decision = decide(outcome, session.tenant.autoApprove);
       // The status condition is the single decider: if another worker or a reviewer already
       // moved the session, this update matches nothing and no result is written.

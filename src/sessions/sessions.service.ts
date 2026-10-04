@@ -57,6 +57,7 @@ export class SessionsService {
       externalRef: session.externalRef,
       status: expired ? 'EXPIRED' : session.status,
       expiresAt: session.expiresAt,
+      requireDrivingLicence: session.requireLicence,
       uploaded: session.documents.map((d) => d.kind),
       documentsDeletedAt: session.documentsDeletedAt,
       verification: session.result ? toSummary(session.result) : null,
