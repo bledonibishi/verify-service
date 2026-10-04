@@ -22,8 +22,8 @@ const ok = (json: unknown): Reply => ({ status: 200, json });
 
 interface Options {
   url?: string;
-  /** The answer to GET /v1/upload/:token. */
-  session?: Reply;
+  /** The answer(s) to GET /v1/upload/:token, consumed in order; the last one repeats. */
+  session?: Reply | Reply[];
   /** Replies for uploads/submit, consumed in order; the last one repeats. */
   replies?: Reply[];
   /** null: the browser has no createImageBitmap. */
@@ -38,12 +38,14 @@ function boot(o: Options = {}) {
   const w = dom.window as any;
   const calls: Call[] = [];
   const replies = [...(o.replies ?? [{ status: 204 }])];
+  const sessions = Array.isArray(o.session) ? [...o.session] : [o.session ?? ok(PLAIN)];
   const canvas: { width?: number; height?: number; quality?: number; type?: string; draws: number } = { draws: 0 };
 
   w.fetch = async (url: string, init: { method?: string; body?: unknown } = {}) => {
     const call: Call = { method: init.method ?? 'GET', url, body: init.body };
     calls.push(call);
-    const r: Reply = call.method === 'GET' ? o.session ?? ok(PLAIN) : replies.length > 1 ? replies.shift()! : replies[0];
+    const pool = call.method === 'GET' ? sessions : replies;
+    const r: Reply = pool.length > 1 ? pool.shift()! : pool[0];
     if (r instanceof Error) throw r;
     return { status: r.status, json: async () => r.json ?? {} };
   };
@@ -244,7 +246,8 @@ describe('hosted page', () => {
   });
 
   it('handles a failed or refused submit', async () => {
-    const mk = (submit: Reply) => boot({ replies: [{ status: 204 }, { status: 204 }, { status: 204 }, submit] });
+    // A bare 410 (no reason given) is looked into: the session is then also reported gone, so the link is dead
+    const mk = (submit: Reply) => boot({ replies: [{ status: 204 }, { status: 204 }, { status: 204 }, submit], session: [ok(PLAIN), { status: 410 }] });
     const finish = async (env: ReturnType<typeof boot>) => {
       await start(env);
       pick(env); await use(env);
@@ -335,6 +338,121 @@ describe('hosted page', () => {
         for (let i = 0; i < 5; i++) { seen.push(text(env.doc)); firstAction(env.doc)?.click(); await flush(); }
         for (const s of seen) expect(s).not.toMatch(/\b(ID_FRONT|ID_BACK|LICENCE_FRONT|LICENCE_BACK|SELFIE)(_HINT)?\b/);
       }
+    });
+  });
+
+  describe('after a reload or a lost reply', () => {
+    const SUBMITTED = { status: 410, json: { code: 'session_submitted', message: 'Session already submitted' } };
+    const EXPIRED = { status: 410, json: { code: 'session_expired', message: 'Session expired' } };
+    const CLOSED = { status: 410, json: { code: 'session_closed', message: 'Session is closed' } };
+    /** Uploads the three photos of a plain session and reaches the review screen. */
+    async function toReview(env: ReturnType<typeof boot>) {
+      await start(env);
+      pick(env); await use(env);
+      button(env.doc, 'Skip this step')!.click(); await flush();
+      pick(env); await use(env);
+      expect(h1(env.doc)).toBe('Almost done');
+    }
+    const submits = (env: ReturnType<typeof boot>) => env.calls.filter((c) => c.method === 'POST' && c.url.endsWith('/submit'));
+    const submit = async (env: ReturnType<typeof boot>) => { button(env.doc, 'Submit for verification')!.click(); await flush(20); };
+
+    it('goes straight to the review screen when every photo was already uploaded, so the user can still submit', async () => {
+      const env = boot({ session: ok({ ...PLAIN, uploaded: ['ID_FRONT', 'ID_BACK', 'SELFIE'] }), replies: [{ status: 200, json: {} }] });
+      await start(env);
+      expect(h1(env.doc)).toBe('Almost done');
+      expect(button(env.doc, 'Submit for verification')!.disabled).toBe(false);
+      await submit(env);
+      expect(h1(env.doc)).toBe('Thank you');
+    });
+
+    it('retries the first request, and offers "Try again" instead of "link not found" if the service stays down', async () => {
+      const flaky = boot({ session: [{ status: 503 }, { status: 503 }, ok(PLAIN)] });
+      await flush();
+      expect(h1(flaky.doc)).toBe('Verify your identity');
+      expect(flaky.calls.filter((c) => c.method === 'GET')).toHaveLength(3);
+
+      const down = boot({ session: [{ status: 503 }, { status: 503 }, { status: 503 }, { status: 503 }, ok(PLAIN)] });
+      await flush();
+      expect(h1(down.doc)).toBe('We cannot reach the service');
+      expect(h1(down.doc)).not.toBe('Link not found');
+      button(down.doc, 'Try again')!.click(); await flush();
+      expect(h1(down.doc)).toBe('Verify your identity');
+
+      const offline = boot({ session: new Error('offline') });
+      await flush();
+      expect(h1(offline.doc)).toBe('We cannot reach the service');
+      expect(button(offline.doc, 'Try again')).toBeDefined();
+    });
+
+    it('thanks a user who reloads after submitting, and says "cannot be used" only when it truly expired', async () => {
+      const done = boot({ session: SUBMITTED });
+      await flush();
+      expect(h1(done.doc)).toBe('Thank you');
+      expect(done.w.sessionStorage.getItem('verify-token')).toBeNull();
+      const expired = boot({ session: EXPIRED });
+      await flush();
+      expect(h1(expired.doc)).toBe('This link cannot be used');
+      const unknown = boot({ session: { status: 410 } });
+      await flush();
+      expect(h1(unknown.doc)).toBe('This link cannot be used');
+    });
+
+    it('does not tell the user their link is dead when the submit went through but its reply was lost', async () => {
+      // 1) the connection drops after the service accepted it: the page looks, sees it was submitted, and thanks the user
+      const lost = boot({ replies: [{ status: 204 }, { status: 204 }, new Error('connection reset')], session: [ok(PLAIN), SUBMITTED] });
+      await toReview(lost);
+      await submit(lost);
+      expect(h1(lost.doc)).toBe('Thank you');
+      expect(submits(lost)).toHaveLength(1); // never sent a second time
+
+      // 2) the service answered 503: same, it looks first
+      const busy = boot({ replies: [{ status: 204 }, { status: 204 }, { status: 503 }], session: [ok(PLAIN), SUBMITTED] });
+      await toReview(busy);
+      await submit(busy);
+      expect(h1(busy.doc)).toBe('Thank you');
+      expect(submits(busy)).toHaveLength(1);
+    });
+
+    it('submits again only when the session is verifiably still open', async () => {
+      const env = boot({ replies: [{ status: 204 }, { status: 204 }, new Error('reset'), { status: 200, json: { status: 'PROCESSING' } }], session: [ok(PLAIN), ok(PLAIN)] });
+      await toReview(env);
+      await submit(env);
+      expect(submits(env)).toHaveLength(2); // the look showed it was still open, so it went again
+      expect(h1(env.doc)).toBe('Thank you');
+    });
+
+    it('treats an explicit "already submitted" as success and an explicit "expired" as a dead link', async () => {
+      const again = boot({ replies: [{ status: 204 }, { status: 204 }, SUBMITTED] });
+      await toReview(again);
+      await submit(again);
+      expect(h1(again.doc)).toBe('Thank you');
+      expect(submits(again)).toHaveLength(1);
+
+      const dead = boot({ replies: [{ status: 204 }, { status: 204 }, EXPIRED] });
+      await toReview(dead);
+      await submit(dead);
+      expect(h1(dead.doc)).toBe('This link cannot be used');
+    });
+
+    it('asks the service what "closed" meant before deciding', async () => {
+      const wasSubmitted = boot({ replies: [{ status: 204 }, { status: 204 }, CLOSED], session: [ok(PLAIN), SUBMITTED] });
+      await toReview(wasSubmitted);
+      await submit(wasSubmitted);
+      expect(h1(wasSubmitted.doc)).toBe('Thank you');
+      const wasExpired = boot({ replies: [{ status: 204 }, { status: 204 }, CLOSED], session: [ok(PLAIN), EXPIRED] });
+      await toReview(wasExpired);
+      await submit(wasExpired);
+      expect(h1(wasExpired.doc)).toBe('This link cannot be used');
+    });
+
+    it('gives up cleanly when it cannot find out, never resubmits blindly, and lets the user try again', async () => {
+      const env = boot({ replies: [{ status: 204 }, { status: 204 }, new Error('reset')], session: [ok(PLAIN), new Error('still offline')] });
+      await toReview(env);
+      await submit(env);
+      expect(submits(env)).toHaveLength(1);
+      expect(text(env.doc)).toContain('The connection failed');
+      expect(h1(env.doc)).toBe('Almost done'); // not a dead-link screen
+      expect(button(env.doc, 'Submit for verification')!.disabled).toBe(false);
     });
   });
 });

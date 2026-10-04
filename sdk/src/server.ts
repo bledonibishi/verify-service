@@ -55,7 +55,7 @@ export class VerifyClient {
         this.http.json<CreatedSession>({ method: 'POST', path: '/v1/sessions', headers: { ...this.auth, 'content-type': 'application/json' }, body: JSON.stringify(input) }),
       get: (id) => this.http.json<Session>({ method: 'GET', path: `/v1/sessions/${enc(id)}`, headers: this.auth, retry: true }),
       delete: async (id) => {
-        await this.http.call({ method: 'DELETE', path: `/v1/sessions/${enc(id)}`, headers: this.auth, retry: true });
+        await this.http.call({ method: 'DELETE', path: `/v1/sessions/${enc(id)}`, headers: this.auth, retry: true, treatMissingAsDone: true });
       },
       evidence: async (id) => {
         const res = await this.http.call({ method: 'GET', path: `/v1/sessions/${enc(id)}/evidence`, headers: this.auth, retry: true });

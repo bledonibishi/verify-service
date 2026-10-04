@@ -2192,10 +2192,19 @@ describe('verification flow (e2e)', () => {
         const used = await create();
         for (const kind of ['ID_FRONT', 'SELFIE']) await request(http()).post(`/v1/upload/${used.uploadToken}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
         await request(http()).post(`/v1/upload/${used.uploadToken}/submit`).expect(200);
-        await request(http()).get(`/v1/upload/${used.uploadToken}`).expect(410);
+        const submitted = await request(http()).get(`/v1/upload/${used.uploadToken}`).expect(410);
+        // A machine-readable reason, so a client can thank the user instead of calling a used link dead
+        expect(submitted.body).toMatchObject({ statusCode: 410, code: 'session_submitted' });
+        const again = await request(http()).post(`/v1/upload/${used.uploadToken}/submit`).expect(410);
+        expect(again.body.code).toBe('session_submitted');
         const old = await create();
         await prisma.session.update({ where: { id: old.id }, data: { expiresAt: new Date(Date.now() - 1000) } });
-        await request(http()).get(`/v1/upload/${old.uploadToken}`).expect(410);
+        const expired = await request(http()).get(`/v1/upload/${old.uploadToken}`).expect(410);
+        expect(expired.body).toMatchObject({ code: 'session_expired', message: 'Session expired' });
+        // Once expiry has been recorded, it is still "expired", not "submitted"
+        const afterRecord = await request(http()).get(`/v1/upload/${old.uploadToken}`).expect(410);
+        expect(afterRecord.body.code).toBe('session_expired');
+        expect((await request(http()).post(`/v1/upload/${old.uploadToken}/SELFIE`).attach('file', PNG, { filename: 'a.png' }).expect(410)).body.code).toBe('session_expired');
       });
     });
 

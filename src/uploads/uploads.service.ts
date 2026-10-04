@@ -8,6 +8,10 @@ import { LIVENESS_PROVIDER, LivenessProvider, LivenessUnavailableError } from '.
 import { VerificationWorker } from '../verification/verification.worker';
 import { detectImageType } from './image-type';
 
+/** A 410 with a machine-readable reason, so a client can tell "already submitted" from "expired". */
+const gone = (message: string, code: 'session_submitted' | 'session_expired' | 'session_closed') =>
+  new GoneException({ statusCode: 410, error: 'Gone', message, code });
+
 @Injectable()
 export class UploadsService {
   constructor(
@@ -24,14 +28,15 @@ export class UploadsService {
       include: { tenant: true, documents: true },
     });
     if (!session) throw new NotFoundException('Unknown session');
-    if (session.status !== SessionStatus.PENDING) throw new GoneException('Session already submitted');
+    if (session.status === SessionStatus.EXPIRED) throw gone('Session expired', 'session_expired');
+    if (session.status !== SessionStatus.PENDING) throw gone('Session already submitted', 'session_submitted');
     if (session.expiresAt.getTime() < Date.now()) {
       // Conditional so a submit that won a race is never overwritten with EXPIRED.
       await this.prisma.session.updateMany({
         where: { id: session.id, status: SessionStatus.PENDING },
         data: { status: SessionStatus.EXPIRED },
       });
-      throw new GoneException('Session expired');
+      throw gone('Session expired', 'session_expired');
     }
     return session;
   }
@@ -91,7 +96,7 @@ export class UploadsService {
     if (stored.count === 0) {
       const now = await this.prisma.session.findUnique({ where: { id: session.id } });
       if (!now || now.status !== SessionStatus.PENDING || now.expiresAt.getTime() <= Date.now()) {
-        throw new GoneException('Session is closed');
+        throw gone('Session is closed', 'session_closed');
       }
       throw new ConflictException('A liveness challenge was started elsewhere; retry');
     }
@@ -121,7 +126,7 @@ export class UploadsService {
           where: { id: session.id, status: SessionStatus.PENDING, expiresAt: { gt: new Date() } },
           data: { updatedAt: new Date() },
         });
-        if (open.count === 0) throw new GoneException('Session is closed');
+        if (open.count === 0) throw gone('Session is closed', 'session_closed');
 
         const existing = await tx.document.findUnique({
           where: { sessionId_kind: { sessionId: session.id, kind } },
@@ -165,7 +170,7 @@ export class UploadsService {
         where: { id: session.id, status: SessionStatus.PENDING, expiresAt: { gt: new Date() } },
         data: { status: SessionStatus.PROCESSING },
       });
-      if (claimed.count === 0) throw new GoneException('Session already submitted or expired');
+      if (claimed.count === 0) throw gone('Session already submitted or expired', 'session_closed');
       await tx.verificationJob.create({ data: { sessionId: session.id } });
       await tx.auditLog.create({ data: { sessionId: session.id, event: 'session.submitted' } });
     });

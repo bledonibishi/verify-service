@@ -63,7 +63,7 @@ const current = await verify.sessions.get(session.id);
 
 Webhook rules (see the README for the full contract): verify the signature on the **raw** body before trusting anything, reject old timestamps (the helper does, 5 minutes by default), and **dedupe on `eventId`**. Events can arrive out of order after retries, so use `status` and `occurredAt`, not arrival order. `verify.webhookEvents.list('FAILED')` shows events that gave up and `retry(id)` replays one.
 
-Other calls: `verify.sessions.delete(id)` (erase a person now), `evidence(id)` and `evidenceDocument(id, kind)` (tenants with evidence export; pass `webhookSecret` to have the bundle's signature checked for you). Reads and deletes are retried on network errors, 429 and 5xx; **creating a session is never retried**, because a repeat would create a second one. Errors are `VerifyApiError` (with `status`, `isNotFound`, `isRateLimited`) or `VerifyNetworkError`.
+Other calls: `verify.sessions.delete(id)` (erase a person now), `evidence(id)` and `evidenceDocument(id, kind)` (tenants with evidence export; pass `webhookSecret` to have the bundle's signature checked for you). Reads and deletes are retried on network errors, 429 and 5xx (a delete whose reply was lost and that then finds nothing to delete counts as done); **creating a session is never retried**, because a repeat would create a second one. Errors are `VerifyApiError` (with `status`, `isNotFound`, `isRateLimited`) or `VerifyNetworkError`.
 
 ### In your own screens (browser SDK)
 
@@ -78,7 +78,7 @@ for (const step of steps) await upload.upload(step.kind, photoFor(step.kind)); /
 await upload.submit();                                // the link is then used up
 ```
 
-The upload endpoints answer CORS for any origin because the one-time token, not the origin, is the credential (no cookies are involved). Nothing else on the service allows cross-origin calls. Uploads are retried on transient failures; `submit` is not.
+The upload endpoints answer CORS for any origin because the one-time token, not the origin, is the credential (no cookies are involved). Nothing else on the service allows cross-origin calls. Uploads are retried on transient failures; `submit` is not, because a repeat after a lost reply would be refused. `410` answers carry a machine-readable `code` (`error.code` on `VerifyApiError`): `session_submitted` (already submitted, so thank the user), `session_expired`, or `session_closed` (look at `getSession()` again to find out which). If a `submit` fails without a clear answer, call `getSession()` before trying again: a `410` with `session_submitted` means it went through.
 
 ## The hosted page
 
@@ -87,7 +87,7 @@ The upload endpoints answer CORS for any origin because the one-time token, not 
 - asks for the ID front and back, the licence front and back when requested, and a selfie, in the order the service returns (`GET /v1/upload/:token`);
 - opens the phone's camera through the browser's file picker (`capture`: rear camera for documents, front for the selfie), with a gallery option;
 - **shrinks each photo to at most 2000 px and re-encodes it as JPEG in the browser** before upload (phone photos are large; this also turns HEIC and other formats into something the service accepts), and falls back to the original only when the browser cannot and the file is small enough;
-- retries transient failures, resumes after a reload (the token is kept in `sessionStorage` and removed from the address bar), and explains expired or used links;
+- retries transient failures (but never blindly re-sends the final submit: after an unclear failure it first checks whether the submission went through), resumes after a reload, thanks a user who reloads after submitting, (the token is kept in `sessionStorage` and removed from the address bar), and explains expired or used links;
 - is available in English, Albanian and Serbian (Latin), chosen from the browser language or `?lang=en|sq|sr`.
 
 The token lives in the URL **fragment**, which browsers never send to servers, so it stays out of access logs and `Referer` headers. The page is served with a strict Content-Security-Policy (no inline script or style, nothing from other origins), `Referrer-Policy: no-referrer`, `Cache-Control: no-store`, and cannot be framed (`X-Frame-Options: DENY`). To embed it in your own site, list your origins in `HOSTED_FRAME_ANCESTORS` (space-separated `https://app.example.com`); invalid entries are ignored and the default is no embedding. For webviews, make sure camera permission is granted to the webview.

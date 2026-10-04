@@ -8,6 +8,11 @@ export class VerifyApiError extends Error {
     super(message);
     this.name = 'VerifyApiError';
   }
+  /** A machine-readable reason when the service gives one, e.g. `session_submitted` or `session_expired` on a 410. */
+  get code(): string | undefined {
+    const c = (this.body as { code?: unknown } | undefined)?.code;
+    return typeof c === 'string' ? c : undefined;
+  }
   get isNotFound() {
     return this.status === 404;
   }

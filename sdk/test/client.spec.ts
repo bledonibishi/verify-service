@@ -102,6 +102,43 @@ describe('VerifyClient', () => {
     await s.close();
   });
 
+  describe('deleting when the reply is lost', () => {
+    it('treats a 404 after a connection that dropped mid-delete as done, because the first attempt got through', async () => {
+      const s = await api((req, res, _b, n) => (n === 1 ? void req.socket.destroy() : json(res, 404, { message: 'Session not found' })));
+      await expect(new VerifyClient({ apiKey: 'k', baseUrl: s.url }).sessions.delete('abc')).resolves.toBeUndefined();
+      expect(s.seen).toHaveLength(2);
+      await s.close();
+    });
+
+    it('does the same after a 5xx, whose outcome is also unknown', async () => {
+      const s = await api((_r, res, _b, n) => (n === 1 ? json(res, 502, { message: 'bad gateway' }) : json(res, 404, { message: 'Session not found' })));
+      await expect(new VerifyClient({ apiKey: 'k', baseUrl: s.url }).sessions.delete('abc')).resolves.toBeUndefined();
+      await s.close();
+    });
+
+    it('still reports a 404 on the very first attempt, and after a 429 (which was refused, not carried out)', async () => {
+      const first = await api((_r, res) => json(res, 404, { message: 'Session not found' }));
+      await expect(new VerifyClient({ apiKey: 'k', baseUrl: first.url }).sessions.delete('abc')).rejects.toMatchObject({ status: 404, isNotFound: true });
+      await first.close();
+      const throttled = await api((_r, res, _b, n) => (n === 1 ? json(res, 429, { message: 'slow down' }) : json(res, 404, { message: 'Session not found' })));
+      await expect(new VerifyClient({ apiKey: 'k', baseUrl: throttled.url }).sessions.delete('abc')).rejects.toMatchObject({ status: 404 });
+      await throttled.close();
+    });
+
+    it('does not hide a 404 for other calls', async () => {
+      const s = await api((req, res, _b, n) => (n === 1 ? void req.socket.destroy() : json(res, 404, { message: 'Session not found' })));
+      await expect(new VerifyClient({ apiKey: 'k', baseUrl: s.url }).sessions.get('abc')).rejects.toMatchObject({ status: 404 });
+      await s.close();
+    });
+  });
+
+  it('exposes the machine-readable code of an error', async () => {
+    const s = await api((_r, res) => json(res, 410, { statusCode: 410, message: 'Session already submitted', code: 'session_submitted' }));
+    const err = await new UploadClient({ baseUrl: s.url, token: 'tok' }).getSession().catch((e) => e);
+    expect(err).toMatchObject({ status: 410, code: 'session_submitted' });
+    await s.close();
+  });
+
   it('deletes a session', async () => {
     const s = await api((_r, res) => res.writeHead(204).end());
     await expect(new VerifyClient({ apiKey: 'k', baseUrl: s.url }).sessions.delete('abc')).resolves.toBeUndefined();

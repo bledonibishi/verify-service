@@ -70,7 +70,7 @@ export const VERIFY_JS = `
       invalidTitle: 'Link not found', invalid: 'Open the link exactly as you received it, or ask for a new one.',
       tooLarge: 'That photo is too large. Try a different one.', notImage: 'We could not read that file as a photo. Try taking a new photo.',
       network: 'The connection failed. Check your internet and try again.', rate: 'Too many attempts. Wait a minute and try again.', generic: 'Something went wrong. Please try again.',
-      missing: 'Some required photos are missing.', language: 'Language', alreadySent: 'Already sent ✓ — continue'
+      missing: 'Some required photos are missing.', language: 'Language', alreadySent: 'Already sent ✓ — continue', tryAgain: 'Try again', trouble: 'We cannot reach the service'
     },
     sq: {
       title: 'Verifikoni identitetin tuaj', intro: 'Na duhen disa fotografi për të konfirmuar kush jeni. Zgjat rreth dy minuta.',
@@ -90,7 +90,7 @@ export const VERIFY_JS = `
       invalidTitle: 'Lidhja nuk u gjet', invalid: 'Hapeni lidhjen saktësisht ashtu siç e morët, ose kërkoni një të re.',
       tooLarge: 'Ajo foto është shumë e madhe. Provoni një tjetër.', notImage: 'Nuk e lexuam atë skedar si foto. Provoni të bëni një foto të re.',
       network: 'Lidhja dështoi. Kontrolloni internetin dhe provoni përsëri.', rate: 'Shumë përpjekje. Prisni një minutë dhe provoni përsëri.', generic: 'Diçka shkoi keq. Ju lutemi provoni përsëri.',
-      missing: 'Mungojnë disa fotografi të detyrueshme.', language: 'Gjuha', alreadySent: 'Tashmë u dërgua ✓ — vazhdo'
+      missing: 'Mungojnë disa fotografi të detyrueshme.', language: 'Gjuha', alreadySent: 'Tashmë u dërgua ✓ — vazhdo', tryAgain: 'Provo përsëri', trouble: 'Nuk mund të lidhemi me shërbimin'
     },
     sr: {
       title: 'Potvrdite svoj identitet', intro: 'Potrebno je nekoliko fotografija da potvrdimo ko ste. Traje oko dva minuta.',
@@ -110,7 +110,7 @@ export const VERIFY_JS = `
       invalidTitle: 'Veza nije pronađena', invalid: 'Otvorite vezu tačno onako kako ste je dobili ili zatražite novu.',
       tooLarge: 'Ta fotografija je prevelika. Pokušajte drugu.', notImage: 'Nismo mogli da pročitamo taj fajl kao fotografiju. Pokušajte da napravite novu.',
       network: 'Veza je pala. Proverite internet i pokušajte ponovo.', rate: 'Previše pokušaja. Sačekajte minut i pokušajte ponovo.', generic: 'Nešto nije u redu. Pokušajte ponovo.',
-      missing: 'Nedostaju neke obavezne fotografije.', language: 'Jezik', alreadySent: 'Već poslato ✓ — nastavi'
+      missing: 'Nedostaju neke obavezne fotografije.', language: 'Jezik', alreadySent: 'Već poslato ✓ — nastavi', tryAgain: 'Pokušaj ponovo', trouble: 'Ne možemo da se povežemo sa servisom'
     }
   };
 
@@ -227,7 +227,7 @@ export const VERIFY_JS = `
   // ---- screens ---------------------------------------------------------------------------------
   function show() {
     var steps = state.steps;
-    if (state.screen === 'fatal') return showFatal(state.fatal[0], state.fatal[1]);
+    if (state.screen === 'fatal') return showFatal(state.fatal[0], state.fatal[1], state.fatal[2]);
     if (state.screen === 'done') return showDone();
     if (state.screen === 'review') return showReview();
     if (state.screen === 'step' && state.index < steps.length) return showStep();
@@ -235,10 +235,14 @@ export const VERIFY_JS = `
   }
 
   // Keys, not text, so switching language re-renders the same message in the new language
-  function showFatal(titleKey, textKey) {
+  function showFatal(titleKey, textKey, retry) {
     state.screen = 'fatal';
-    state.fatal = [titleKey, textKey];
-    render([el('div', { class: 'card' }, [el('h1', { text: t(titleKey) }), textKey ? el('p', { text: t(textKey) }) : null])]);
+    state.fatal = [titleKey, textKey, retry];
+    render([el('div', { class: 'card' }, [
+      el('h1', { text: t(titleKey) }),
+      textKey ? el('p', { text: t(textKey) }) : null,
+      retry ? el('button', { class: 'primary', type: 'button', text: t('tryAgain'), onclick: retry }) : null
+    ])]);
   }
 
   function showIntro() {
@@ -251,8 +255,15 @@ export const VERIFY_JS = `
       el('p', { class: 'muted', text: t('need') }),
       el('ul', { class: 'plain' }, needs.map(function (n) { return el('li', { text: n }); })),
       el('p', { class: 'muted', text: t('privacy') }),
-      el('button', { class: 'primary', type: 'button', text: t('start'), onclick: function () { state.screen = 'step'; state.index = firstOpen(); show(); } })
+      el('button', { class: 'primary', type: 'button', text: t('start'), onclick: begin })
     ])]);
+  }
+
+  // Everything already uploaded (a reload after the last photo): go straight to the review screen
+  function begin() {
+    state.index = firstOpen();
+    state.screen = state.index >= state.steps.length ? 'review' : 'step';
+    show();
   }
 
   function firstOpen() {
@@ -331,17 +342,42 @@ export const VERIFY_JS = `
     var err = el('p', { class: 'err', role: 'alert', text: missing ? t('missing') : '' });
     var btn = el('button', { class: 'primary', type: 'button', text: t('submit') });
     btn.disabled = missing;
+    function reenable(message) { state.busy = false; btn.disabled = false; btn.textContent = t('submit'); err.textContent = message; }
+    // A 410 says why: already submitted (this or another attempt got through) or no longer usable
+    function gone(data) {
+      state.busy = false;
+      if (data && data.code === 'session_submitted') return showDone();
+      if (data && data.code === 'session_expired') return showFatal('closedTitle', 'closed');
+      return look(); // "closed" is ambiguous: ask the service which it was
+    }
+    // Submitting is not safe to repeat blindly: if the first request got through but its reply was
+    // lost, a repeat would be refused and wrongly tell the user their link is dead. So after an
+    // unclear failure, look at the session first, and only submit again if it is still open.
+    var unclear = 0;
+    function look() {
+      if (++unclear > 5) return reenable(t('network'));
+      return wait(400 * Math.pow(2, unclear)).then(function () { return api('GET', ''); }).then(function (r) {
+        if (r.status === 200) return attempt();            // still open: the first request did not go through
+        if (r.status === 410) { state.busy = false; return r.data && r.data.code === 'session_submitted' ? showDone() : showFatal('closedTitle', 'closed'); }
+        if (r.status === 404) return showFatal('invalidTitle', 'invalid');
+        return look();
+      }, look);
+    }
+    function attempt() {
+      return api('POST', '/submit').then(function (r) {
+        if (r.status === 200) { state.busy = false; return showDone(); }
+        if (r.status === 404) return showFatal('invalidTitle', 'invalid');
+        if (r.status === 410) return gone(r.data);
+        if (r.status === 400) return reenable(t('missing'));
+        if (r.status >= 500 || r.status === 429) return look();
+        return reenable(messageFor(r.status));
+      }, look);
+    }
     btn.addEventListener('click', function () {
       if (state.busy) return;
       state.busy = true; btn.disabled = true; btn.textContent = t('submitting'); err.textContent = '';
-      withRetry(function () { return api('POST', '/submit'); }).then(function (r) {
-        state.busy = false;
-        if (r.status === 200) { state.screen = 'done'; return show(); }
-        if (r.status === 404) return showFatal('invalidTitle', 'invalid');
-        if (r.status === 410) return showFatal('closedTitle', 'closed');
-        btn.disabled = false; btn.textContent = t('submit');
-        err.textContent = r.status === 400 ? t('missing') : messageFor(r.status);
-      }).catch(function () { state.busy = false; btn.disabled = false; btn.textContent = t('submit'); err.textContent = t('network'); });
+      unclear = 0;
+      attempt();
     });
     render([el('div', { class: 'card' }, [
       el('h1', { text: t('review') }),
@@ -372,19 +408,29 @@ export const VERIFY_JS = `
     try { return sessionStorage.getItem('verify-token'); } catch (e) { return null; }
   }
 
+  function load() {
+    return withRetry(function () { return api('GET', ''); }).then(function (r) {
+      if (r.status === 404) return showFatal('invalidTitle', 'invalid');
+      if (r.status === 410) {
+        // Reloaded after submitting: thank the user instead of calling the link dead
+        if (r.data && r.data.code === 'session_submitted') return showDone();
+        return showFatal('closedTitle', 'closed');
+      }
+      // Still failing after the retries: say so and let the user try again, instead of "link not found"
+      if (r.status !== 200) return showFatal('trouble', 'network', load);
+      state.steps = r.data.steps;
+      state.uploaded = {};
+      (r.data.uploaded || []).forEach(function (k) { state.uploaded[k] = true; });
+      state.screen = 'intro';
+      show();
+    }, function () { showFatal('trouble', 'network', load); });
+  }
+
   function start() {
     state.token = readToken();
     document.documentElement.lang = lang;
     if (!state.token) return showFatal('invalidTitle', 'invalid');
-    api('GET', '').then(function (r) {
-      if (r.status === 404) return showFatal('invalidTitle', 'invalid');
-      if (r.status === 410) return showFatal('closedTitle', 'closed');
-      if (r.status !== 200) return showFatal('invalidTitle', 'generic');
-      state.steps = r.data.steps;
-      (r.data.uploaded || []).forEach(function (k) { state.uploaded[k] = true; });
-      state.screen = 'intro';
-      show();
-    }).catch(function () { showFatal('network', null); });
+    load();
   }
 
   start();
