@@ -1,6 +1,6 @@
 # Document storage
 
-Documents are encrypted by the service with AES-256-GCM (`STORAGE_ENCRYPTION_KEY`) **before** they leave the process, then written by a store. Two stores exist, chosen with `STORAGE_DRIVER`:
+Documents are encrypted by the service with AES-256-GCM **before** they leave the process, then written by a store. The key is the master key (`STORAGE_ENCRYPTION_KEY`, development) or AWS KMS (production): see [encryption](encryption.md). Two stores exist, chosen with `STORAGE_DRIVER`:
 
 | Driver | Use | Notes |
 | --- | --- | --- |

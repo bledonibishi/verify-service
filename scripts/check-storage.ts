@@ -32,7 +32,7 @@ async function step(name: string, run: () => Promise<void>): Promise<boolean> {
 
 async function main() {
   const driver = process.env.STORAGE_DRIVER ?? 'local';
-  console.log(`Storage driver: ${driver}${driver === 's3' ? ` in ${process.env.S3_REGION ?? '(no region)'}` : ''}`);
+  console.log(`Storage driver: ${driver}${driver === 's3' ? ` in ${process.env.S3_REGION ?? '(no region)'}` : ''}; keys: ${process.env.STORAGE_KEY_PROVIDER || 'env'}${process.env.STORAGE_KEY_PROVIDER === 'kms' ? ' (AWS KMS)' : ''}`);
   let storage: StorageService;
   try {
     storage = new StorageService({ get: (k: string) => process.env[k] } as never);
@@ -64,7 +64,7 @@ async function main() {
     console.log('All checks passed.');
     if (driver === 's3') console.log('Also confirm in the AWS console that bucket versioning is OFF; otherwise deleted objects survive as old versions.');
   } else {
-    console.log('Some checks failed. 403 usually means the IAM policy or bucket name is wrong: S3_BUCKET must be the full bucket name, and the policy needs s3:ListBucket on the bucket as well as Put/Get/DeleteObject on its objects (without it, a missing object looks like AccessDenied).');
+    console.log('Some checks failed. 403 usually means the IAM policy or bucket name is wrong: S3_BUCKET must be the full bucket name, and the policy needs s3:ListBucket on the bucket as well as Put/Get/DeleteObject on its objects (without it, a missing object looks like AccessDenied). With STORAGE_KEY_PROVIDER=kms, the same user also needs kms:GenerateDataKey and kms:Decrypt on the key.');
     process.exit(1);
   }
 }

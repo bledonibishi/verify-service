@@ -1,8 +1,8 @@
-import { ForbiddenException, GoneException, Injectable, NotFoundException } from '@nestjs/common';
+import { ForbiddenException, GoneException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { DocumentKind, Prisma, Tenant } from '@prisma/client';
 import { hmacSign } from '../common/crypto';
 import { PrismaService } from '../prisma/prisma.service';
-import { StorageService, StoredObjectMissingError } from '../storage/storage.service';
+import { KeyUnavailableError, StorageService, StoredObjectMissingError } from '../storage/storage.service';
 import { toSummary } from '../verification/summary';
 import { reviewSummary } from '../review/review-summary';
 
@@ -83,6 +83,7 @@ export class EvidenceService {
       } catch (err) {
         // An erasure that did not finish (rows survive, file gone) reads as deleted, not as a server error
         if (err instanceof StoredObjectMissingError) throw new GoneException('Document was deleted');
+        if (err instanceof KeyUnavailableError) throw new ServiceUnavailableException('Document storage is temporarily unavailable');
         throw err;
       }
       await tx.auditLog.create({ data: { sessionId, event: 'evidence.document_exported', detail: { kind } } });
