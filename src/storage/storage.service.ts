@@ -1,15 +1,16 @@
+import { KMSClient } from '@aws-sdk/client-kms';
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { decrypt, encrypt } from '../common/crypto';
-
 import { S3Client } from '@aws-sdk/client-s3';
 import { BlobStore, LocalBlobStore, StoredObjectMissingError } from './blob-store';
+import { EnvKeyProvider, KeyProvider, KeyUnavailableError, KmsKeyProvider, SealContext, StoredObjectCorruptError } from './keys';
 import { S3BlobStore } from './s3-blob-store';
 
-export { StoredObjectMissingError };
+export { KeyUnavailableError, StoredObjectCorruptError, StoredObjectMissingError };
 
-/** Optional injection token for a ready-made store (tests); normally the store is built from configuration. */
+/** Optional injection tokens for ready-made parts (tests); normally both are built from configuration. */
 export const BLOB_STORE = Symbol('BLOB_STORE');
+export const KEY_PROVIDER = Symbol('KEY_PROVIDER');
 
 export interface DocumentStorage {
   put(key: string, data: Buffer): Promise<void>;
@@ -17,25 +18,66 @@ export interface DocumentStorage {
   delete(key: string): Promise<void>;
 }
 
+/** What an object is bound to: its own storage key (`tenant/session/uuid`), and its tenant and session in KMS. */
+export function sealContext(key: string): SealContext {
+  const [tenant, session] = key.split('/');
+  return {
+    aad: key,
+    kmsContext: { app: 'verify-service', purpose: 'document', ...(tenant && session ? { tenant, session } : {}) },
+  };
+}
+
 /**
- * Encrypts every object with AES-256-GCM before it leaves the process, then hands the ciphertext
- * to a store: local disk (development) or S3-compatible object storage (`STORAGE_DRIVER=s3`).
+ * Encrypts every object before it leaves the process and hands the ciphertext to a store: local
+ * disk (development) or S3-compatible object storage (`STORAGE_DRIVER=s3`). The key is either the
+ * master key from STORAGE_ENCRYPTION_KEY, or AWS KMS envelope encryption (STORAGE_KEY_PROVIDER=kms),
+ * which is what production should use.
  */
 @Injectable()
 export class StorageService implements DocumentStorage {
-  private readonly key: Buffer;
   private readonly store: BlobStore;
+  private readonly keys: KeyProvider;
 
-  /** `store` can be injected for tests; otherwise it is chosen from configuration. */
-  constructor(config: ConfigService, @Optional() @Inject(BLOB_STORE) store?: BlobStore) {
-    const raw = config.get<string>('STORAGE_ENCRYPTION_KEY');
-    if (!raw) throw new Error('STORAGE_ENCRYPTION_KEY is required');
-    const key = Buffer.from(raw, 'base64');
-    if (key.length !== 32) {
-      throw new Error('STORAGE_ENCRYPTION_KEY must be 32 bytes, base64-encoded');
-    }
-    this.key = key;
+  /** `store` and `keys` can be injected for tests; otherwise they are chosen from configuration. */
+  constructor(config: ConfigService, @Optional() @Inject(BLOB_STORE) store?: BlobStore, @Optional() @Inject(KEY_PROVIDER) keys?: KeyProvider) {
+    this.keys = keys ?? StorageService.keysFromConfig(config);
     this.store = store ?? StorageService.storeFromConfig(config);
+  }
+
+  private static masterKey(config: ConfigService, required: boolean): EnvKeyProvider | undefined {
+    const raw = config.get<string>('STORAGE_ENCRYPTION_KEY');
+    if (!raw) {
+      if (required) throw new Error('STORAGE_ENCRYPTION_KEY is required');
+      return undefined;
+    }
+    const key = Buffer.from(raw, 'base64');
+    if (key.length !== 32) throw new Error('STORAGE_ENCRYPTION_KEY must be 32 bytes, base64-encoded');
+    return new EnvKeyProvider(key);
+  }
+
+  private static keysFromConfig(config: ConfigService): KeyProvider {
+    const provider = config.get<string>('STORAGE_KEY_PROVIDER') || 'env';
+    if (provider === 'env') return this.masterKey(config, true)!;
+    if (provider !== 'kms') throw new Error(`Unknown STORAGE_KEY_PROVIDER "${provider}"`);
+
+    const keyId = config.get<string>('KMS_KEY_ID');
+    if (!keyId) throw new Error('KMS_KEY_ID is required when STORAGE_KEY_PROVIDER=kms');
+    const region = config.get<string>('KMS_REGION') || config.get<string>('S3_REGION') || config.get<string>('AWS_REGION');
+    if (!region) throw new Error('KMS_REGION is required when STORAGE_KEY_PROVIDER=kms');
+    // Dedicated KMS_* keys, else the storage user's S3_* keys (give that user the KMS permissions), else a role
+    const id = config.get<string>('KMS_ACCESS_KEY_ID') || config.get<string>('S3_ACCESS_KEY_ID');
+    const secret = config.get<string>('KMS_SECRET_ACCESS_KEY') || config.get<string>('S3_SECRET_ACCESS_KEY');
+    if (!!id !== !!secret) throw new Error('Set both access key id and secret for KMS (KMS_* or S3_*), or neither');
+    if (!id && config.get<string>('AWS_ACCESS_KEY_ID')) {
+      throw new Error('AWS_ACCESS_KEY_ID is set (used by face matching) but no KMS_ACCESS_KEY_ID or S3_ACCESS_KEY_ID: set dedicated keys for encryption, or run under an IAM role without AWS_ACCESS_KEY_ID in its environment');
+    }
+    const cache = parseInt(config.get<string>('KMS_DEK_CACHE_SECONDS') ?? '', 10);
+    return new KmsKeyProvider(new KMSClient({ region, ...(id && secret ? { credentials: { accessKeyId: id, secretAccessKey: secret } } : {}) }), {
+      keyId,
+      cacheSeconds: Number.isFinite(cache) && cache >= 0 ? cache : 60,
+      // Only to read (and re-encrypt) objects written before KMS was switched on
+      legacy: this.masterKey(config, false),
+    });
   }
 
   private static storeFromConfig(config: ConfigService): BlobStore {
@@ -72,15 +114,49 @@ export class StorageService implements DocumentStorage {
     });
   }
 
+  /** Which kind of key protects new objects. */
+  get keyProvider(): 'env' | 'kms' {
+    return this.keys.name;
+  }
+
   async put(key: string, data: Buffer): Promise<void> {
-    await this.store.put(key, encrypt(this.key, data));
+    await this.store.put(key, await this.keys.seal(data, sealContext(key)));
   }
 
   async get(key: string): Promise<Buffer> {
-    return decrypt(this.key, await this.store.get(key));
+    return this.keys.open(await this.store.get(key), sealContext(key));
   }
 
   async delete(key: string): Promise<void> {
     await this.store.delete(key);
+  }
+
+  /** Without changing anything: is this object missing, already current, or in an older format? */
+  async inspect(key: string): Promise<'missing' | 'current' | 'stale'> {
+    try {
+      return this.keys.isCurrent(await this.store.get(key)) ? 'current' : 'stale';
+    } catch (err) {
+      if (err instanceof StoredObjectMissingError) return 'missing';
+      throw err;
+    }
+  }
+
+  /**
+   * Re-encrypts one object into the current format (older master-key objects, or objects from
+   * before KMS was enabled). Safe to repeat. The caller must hold the session's row lock so a
+   * concurrent erasure cannot be undone by this write.
+   */
+  async rewrap(key: string): Promise<'missing' | 'current' | 'rewrapped'> {
+    let raw: Buffer;
+    try {
+      raw = await this.store.get(key);
+    } catch (err) {
+      if (err instanceof StoredObjectMissingError) return 'missing';
+      throw err;
+    }
+    if (this.keys.isCurrent(raw)) return 'current';
+    const plaintext = await this.keys.open(raw, sealContext(key));
+    await this.store.put(key, await this.keys.seal(plaintext, sealContext(key)));
+    return 'rewrapped';
   }
 }

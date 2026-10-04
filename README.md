@@ -137,7 +137,7 @@ Each tenant has its own retention windows: documents are deleted 30 days after t
 
 ## Security notes
 
-- Documents are encrypted with AES-256-GCM before they are written to storage (local disk for development, S3 for production, see [docs/storage.md](docs/storage.md)); the key comes from `STORAGE_ENCRYPTION_KEY`.
+- Documents are encrypted with AES-256-GCM before they are written to storage (local disk for development, S3 for production, see [docs/storage.md](docs/storage.md)). The key is the master key in `STORAGE_ENCRYPTION_KEY` for development, or **AWS KMS envelope encryption** (`STORAGE_KEY_PROVIDER=kms`) for production, where no key sits in the configuration, every decryption is audited, and access can be revoked at once. Each object is bound to its tenant, session and storage key. Details, setup and migration: [docs/encryption.md](docs/encryption.md).
 - Upload tokens and API keys are stored only as SHA-256 hashes.
 - File types are detected from magic bytes, not the client's content-type.
 - Never commit `.env`; `.env.example` documents every variable.

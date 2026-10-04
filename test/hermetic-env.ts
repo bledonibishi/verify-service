@@ -15,10 +15,15 @@ for (const name of [
   'S3_KMS_KEY_ID',
   'S3_KEY_PREFIX',
   'TESSERACT_BIN',
+  'KMS_KEY_ID',
+  'KMS_ACCESS_KEY_ID',
+  'KMS_SECRET_ACCESS_KEY',
+  'KMS_REGION',
 ]) {
   process.env[name] = '';
 }
 process.env.STORAGE_DRIVER = 'local';
+process.env.STORAGE_KEY_PROVIDER = 'env';
 process.env.FACE_PROVIDER = 'none';
 process.env.LIVENESS_PROVIDER = 'none';
 process.env.OCR_PROVIDER = 'tesseract';

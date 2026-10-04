@@ -19,6 +19,7 @@
     "reviewer": "ts-node scripts/reviewer.ts",
     "usage:report": "ts-node scripts/usage-report.ts",
     "usage:adjust": "ts-node scripts/usage-adjust.ts",
+    "storage:reencrypt": "ts-node scripts/storage-reencrypt.ts",
     "storage:check": "ts-node scripts/check-storage.ts",
     "check:mrz": "ts-node scripts/check-mrz.ts"
   },
@@ -26,6 +27,7 @@
     "node": ">=20.12"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "^3.1146.0",
     "@aws-sdk/client-rekognition": "^3.1144.0",
     "@aws-sdk/client-s3": "^3.1144.0",
     "@nestjs/common": "^10.4.22",

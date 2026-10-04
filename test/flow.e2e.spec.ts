@@ -5,7 +5,7 @@ import { Test } from '@nestjs/testing';
 import { PrismaClient } from '@prisma/client';
 import { randomBytes, randomUUID } from 'crypto';
 import { createServer, Server } from 'http';
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { AddressInfo } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -21,7 +21,9 @@ import { UploadClient, VerifyApiError, VerifyClient, constructWebhookEvent } fro
 import { OutboxService } from '../src/webhooks/outbox.service';
 import { WebhookDispatcher } from '../src/webhooks/dispatcher';
 import { RetentionService } from '../src/retention/retention.service';
-import { StorageService } from '../src/storage/storage.service';
+import { reencryptAll } from '../src/storage/reencrypt';
+import { KeyUnavailableError, StorageService } from '../src/storage/storage.service';
+import { encrypt as legacyEncrypt } from '../src/common/crypto';
 import { hashPassword } from '../src/review/password';
 import { VerificationWorker } from '../src/verification/verification.worker';
 
@@ -2676,6 +2678,115 @@ describe('verification flow (e2e)', () => {
       expect(page.items).toHaveLength(1);
       expect(page.nextCursor).toBeNull();
       await expect(client.usage.get('2026-99')).rejects.toMatchObject({ status: 400 });
+    });
+  });
+
+  describe('document encryption', () => {
+    const http = () => app.getHttpServer();
+    const suffix = randomToken(6).toLowerCase().replace(/[^a-z0-9]/g, 'x');
+    let t: { id: string; h: { Authorization: string } };
+    const files = (sessionId: string) => {
+      const dir = join(storageDir, t.id, sessionId);
+      try {
+        return readdirSync(dir).map((f) => join(dir, f));
+      } catch {
+        return [];
+      }
+    };
+
+    beforeAll(async () => {
+      const key = `vk_enc_${suffix}`;
+      const row = await prisma.tenant.create({ data: { name: `enc-${suffix}`, apiKeyHash: sha256(key), webhookSecret: 'x', evidenceExport: true } });
+      t = { id: row.id, h: { Authorization: `Bearer ${key}` } };
+    });
+
+    async function session(ref: string) {
+      const created = await request(http()).post('/v1/sessions').set(t.h).send({ externalRef: ref }).expect(201);
+      const token = created.body.uploadToken as string;
+      for (const kind of ['ID_FRONT', 'SELFIE']) await request(http()).post(`/v1/upload/${token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+      return created.body.id as string;
+    }
+    const docs = (id: string) => prisma.document.findMany({ where: { sessionId: id }, orderBy: { kind: 'asc' } });
+
+    it('writes each upload bound to its own storage key, with nothing readable on disk', async () => {
+      const id = await session('bound');
+      const [mine] = await docs(id);
+      const onDisk = readFileSync(join(storageDir, mine.storageKey));
+      expect(onDisk.subarray(0, 4).toString()).toBe('VSE0');
+      expect(onDisk.includes(Buffer.from('fake-image-body'))).toBe(false);
+      // Moving an object to another key (here: another session's file) must not decrypt
+      const other = await session('bound-other');
+      const [theirs] = await docs(other);
+      const theirPath = join(storageDir, theirs.storageKey);
+      const original = readFileSync(theirPath);
+      writeFileSync(theirPath, onDisk);
+      const storage = app.get(StorageService);
+      await expect(storage.get(theirs.storageKey)).rejects.toThrow('failed verification');
+      writeFileSync(theirPath, original);
+      expect((await storage.get(theirs.storageKey)).includes(Buffer.from('fake-image-body'))).toBe(true);
+    });
+
+    it('re-encrypts old-format objects, is safe to repeat, and a dry run changes nothing', async () => {
+      const id = await session('legacy');
+      const storage = app.get(StorageService);
+      const masterKey = Buffer.from(process.env.STORAGE_ENCRYPTION_KEY!, 'base64');
+      // Put the objects back in the original format, as if written before binding existed
+      for (const d of await docs(id)) {
+        const plain = await storage.get(d.storageKey);
+        writeFileSync(join(storageDir, d.storageKey), legacyEncrypt(masterKey, plain));
+      }
+      const before = files(id).map((f) => readFileSync(f).toString('hex'));
+      expect(files(id).every((f) => readFileSync(f).subarray(0, 4).toString() !== 'VSE0')).toBe(true);
+
+      const dry = await reencryptAll(prisma, storage, { dryRun: true, tenantId: t.id });
+      expect(dry.rewrapped).toBeGreaterThanOrEqual(2);
+      expect(files(id).map((f) => readFileSync(f).toString('hex'))).toEqual(before); // nothing was written
+
+      const first = await reencryptAll(prisma, storage, { tenantId: t.id });
+      expect(first.failed).toBe(0);
+      expect(files(id).every((f) => readFileSync(f).subarray(0, 4).toString() === 'VSE0')).toBe(true);
+      for (const d of await docs(id)) expect((await storage.get(d.storageKey)).includes(Buffer.from('fake-image-body'))).toBe(true);
+      const again = await reencryptAll(prisma, storage, { tenantId: t.id });
+      expect(again.rewrapped).toBe(0); // already current
+    });
+
+    it('never writes an object back after the person was erased, even when erasure races it', async () => {
+      const storage = app.get(StorageService);
+      const masterKey = Buffer.from(process.env.STORAGE_ENCRYPTION_KEY!, 'base64');
+      for (let round = 0; round < 6; round++) {
+        const id = await session(`race-${round}`);
+        for (const d of await docs(id)) writeFileSync(join(storageDir, d.storageKey), legacyEncrypt(masterKey, await storage.get(d.storageKey)));
+        await Promise.all([reencryptAll(prisma, storage, { tenantId: t.id }), request(http()).delete(`/v1/sessions/${id}`).set(t.h).expect(204)]);
+        expect(await prisma.session.count({ where: { id } })).toBe(0);
+        expect(files(id)).toEqual([]); // no resurrected ciphertext
+      }
+    });
+
+    it('counts a document it cannot re-encrypt as failed, leaves it as it was, and carries on', async () => {
+      const id = await session('unreadable');
+      const storage = app.get(StorageService);
+      const [first, second] = await docs(id);
+      writeFileSync(join(storageDir, first.storageKey), Buffer.from('not a valid object at all, just junk bytes here'));
+      const damaged = readFileSync(join(storageDir, first.storageKey));
+      const masterKey = Buffer.from(process.env.STORAGE_ENCRYPTION_KEY!, 'base64');
+      writeFileSync(join(storageDir, second.storageKey), legacyEncrypt(masterKey, Buffer.from('still fine')));
+      const report = await reencryptAll(prisma, storage, { tenantId: t.id });
+      expect(report.failed).toBeGreaterThanOrEqual(1);
+      expect(readFileSync(join(storageDir, first.storageKey)).equals(damaged)).toBe(true);
+      expect(readFileSync(join(storageDir, second.storageKey)).subarray(0, 4).toString()).toBe('VSE0'); // the rest went on
+    });
+
+    it('answers 503, not a server error, when the key service is unavailable', async () => {
+      const id = await session('unavailable');
+      const spy = jest.spyOn(StorageService.prototype, 'get').mockRejectedValue(new KeyUnavailableError());
+      try {
+        const evidence = await request(http()).get(`/v1/sessions/${id}/evidence/documents/SELFIE`).set(t.h).expect(503);
+        expect(evidence.body.message).toBe('Document storage is temporarily unavailable');
+        expect(JSON.stringify(evidence.body)).not.toMatch(/kms|arn:|AccessDenied/i); // nothing about the key service leaks
+      } finally {
+        spy.mockRestore();
+      }
+      await request(http()).get(`/v1/sessions/${id}/evidence/documents/SELFIE`).set(t.h).expect(200); // and it recovers
     });
   });
 });

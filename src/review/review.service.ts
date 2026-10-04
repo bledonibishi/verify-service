@@ -1,7 +1,7 @@
-import { ConflictException, GoneException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, GoneException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { DocumentKind, Reviewer, SessionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { StorageService, StoredObjectMissingError } from '../storage/storage.service';
+import { KeyUnavailableError, StorageService, StoredObjectMissingError } from '../storage/storage.service';
 import { toSummary } from '../verification/summary';
 import { reviewSummary } from './review-summary';
 import { OutboxService } from '../webhooks/outbox.service';
@@ -76,6 +76,8 @@ export class ReviewService {
       data = await this.storage.get(doc.storageKey);
     } catch (err) {
       if (err instanceof StoredObjectMissingError) throw new GoneException('Document was deleted');
+      // The key service is down or refusing: say so (and let the reviewer try again) instead of a bare server error
+      if (err instanceof KeyUnavailableError) throw new ServiceUnavailableException('Document storage is temporarily unavailable');
       throw err;
     }
     await this.prisma.auditLog.create({

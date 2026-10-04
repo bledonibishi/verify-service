@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { promises as fs } from 'fs';
 import { dirname, join, resolve } from 'path';
 
@@ -45,7 +46,15 @@ export class LocalBlobStore implements BlobStore {
   async put(key: string, data: Buffer): Promise<void> {
     const file = this.path(key);
     await fs.mkdir(dirname(file), { recursive: true });
-    await fs.writeFile(file, data, { mode: 0o600 });
+    // Write beside it and rename: a reader never sees half a file, and a failed write leaves the old one intact
+    const tmp = `${file}.tmp-${randomBytes(6).toString('hex')}`;
+    try {
+      await fs.writeFile(tmp, data, { mode: 0o600 });
+      await fs.rename(tmp, file);
+    } catch (err) {
+      await fs.rm(tmp, { force: true });
+      throw err;
+    }
   }
 
   async get(key: string): Promise<Buffer> {
