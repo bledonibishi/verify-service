@@ -38,6 +38,12 @@ async function main() {
     console.log('AWS_REGION is not set (expected eu-central-1)');
     process.exit(2);
   }
+  for (const f of [idPath, selfiePath]) {
+    if (!existsSync(f)) {
+      console.log(`Not run: file not found: ${f}`);
+      process.exit(2);
+    }
+  }
   const threshold = Number(flags.find((f) => f.startsWith('--threshold='))?.split('=')[1] ?? 90);
   const provider = RekognitionProvider.forRegion(region);
   try {
