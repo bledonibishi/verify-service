@@ -29,6 +29,11 @@ model Tenant {
   id            String    @id @default(uuid())
   name          String
   apiKeyHash    String    @unique @map("api_key_hash")
+  // After a rotation with a grace period the replaced key still works until this time, so a
+  // tenant can switch without downtime. Rotating with no grace period clears both.
+  previousApiKeyHash      String?   @unique @map("previous_api_key_hash")
+  previousApiKeyExpiresAt DateTime? @map("previous_api_key_expires_at")
+  apiKeyRotatedAt         DateTime? @map("api_key_rotated_at")
   webhookUrl    String?   @map("webhook_url")
   webhookSecret String    @map("webhook_secret")
   // When true, a submission whose automated checks all pass cleanly is approved without a

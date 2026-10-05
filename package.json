@@ -16,6 +16,7 @@
     "prisma:deploy": "prisma migrate deploy",
     "tenant:create": "ts-node scripts/create-tenant.ts",
     "tenant:update": "ts-node scripts/update-tenant.ts",
+    "tenant:rotate-key": "ts-node scripts/rotate-tenant-key.ts",
     "reviewer": "ts-node scripts/reviewer.ts",
     "usage:report": "ts-node scripts/usage-report.ts",
     "usage:adjust": "ts-node scripts/usage-adjust.ts",
