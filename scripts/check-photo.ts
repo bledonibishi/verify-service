@@ -3,13 +3,15 @@
  *
  *   pnpm check:photo fixtures/private/my-id-back.jpg
  *   pnpm check:photo fixtures/private/my-id-back.jpg --shape   (on failure, also print the OCR shape)
+ *   pnpm check:photo fixtures/private/my-id-back.jpg --variants (shape of the MRZ-like lines each variant gives)
  *
  * Needs `tesseract` installed. Nothing leaves this machine. Prints only pass/fail per check
  * and, with --shape, the OCR text with every digit shown as 9 and every letter as A, so the
  * output is safe to paste into a chat or issue. It never prints names, numbers or dates.
  */
 import { readFileSync } from 'fs';
-import { readKosovoMrz } from '../src/documents/mrz';
+import { cleanMrzText, readKosovoMrz } from '../src/documents/mrz';
+import { mrzVariants } from '../src/ocr/mrz-image';
 import { TesseractProvider } from '../src/ocr/tesseract.provider';
 
 const [path, ...flags] = process.argv.slice(2);
@@ -37,6 +39,16 @@ async function main() {
       console.log(`  document expired: ${read.result.data.expired ? 'yes' : 'no'}`);
       console.log(`  issuer RKS: ${read.result.data.issuingState === 'RKS' ? 'yes' : 'no'}`);
     }
+  }
+  if (flags.includes('--variants')) {
+    // For each way of reading the photo: the length and shape of every line that could be an MRZ line
+    const describe = (label: string, text: string) => {
+      const lines = text.split(/\r?\n/).map(cleanMrzText).filter((l) => l.length >= 20);
+      console.log(`${label}: ${lines.length ? lines.map((l) => `${l.length}:${shape(l)}`).join('  |  ') : '(no long lines)'}`);
+    };
+    describe('as uploaded', asUploaded.text);
+    let n = 0;
+    for await (const v of mrzVariants(image)) describe(`variant ${n++}`, (await engine.readText(v)).text);
   }
   if (!read?.result.ok && flags.includes('--shape')) console.log('OCR shape (digits=9, letters=A):\n' + shape(final.text));
   process.exit(read?.result.ok ? 0 : 1);
