@@ -1,4 +1,4 @@
-import { FieldMatch, IdentityComparison, LenientResult, compareIdentity, extractTd1Lines, parseKosovoTd1 } from '../documents/mrz';
+import { FieldMatch, IdentityComparison, LenientResult, compareIdentity, readKosovoMrz } from '../documents/mrz';
 import type { ExpectedIdentity, Td1Data } from '../documents/mrz';
 import { LicenceOutcome, licenceClean } from '../documents/licence';
 
@@ -63,10 +63,8 @@ export function checkIdBack(ocrText: string, expected: ExpectedIdentity, now = n
  * cross-check). The values are never stored or returned to tenants; only the outcome is.
  */
 export function readIdBack(ocrText: string, expected: ExpectedIdentity, now = new Date()): { outcome: CheckOutcome; data: Td1Data | null } {
-  const lines = extractTd1Lines(ocrText);
-  if (!lines) return { outcome: emptyOutcome('MRZ_NOT_FOUND'), data: null };
-
-  const lenient: LenientResult = parseKosovoTd1(lines, { now });
+  const lenient: LenientResult | null = readKosovoMrz(ocrText, { now });
+  if (!lenient) return { outcome: emptyOutcome('MRZ_NOT_FOUND'), data: null };
   const { result } = lenient;
   const issueCodes: string[] = result.issues.map((i) => i.code);
   const checks = result.checks.map((c) => ({ field: c.field, ok: c.ok }));
