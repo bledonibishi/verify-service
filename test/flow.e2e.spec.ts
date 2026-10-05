@@ -3474,10 +3474,22 @@ describe('verification flow (e2e)', () => {
       const results = await Promise.allSettled([rotateTenantKey(prisma, t.id), rotateTenantKey(prisma, t.id)]);
       const won = results.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof rotateTenantKey>>> => r.status === 'fulfilled');
       expect(won.length).toBeGreaterThanOrEqual(1);
-      // every key that was handed out and is still valid works; there is exactly one current key
       const row = await prisma.tenant.findUniqueOrThrow({ where: { id: t.id } });
       expect(won.filter((w) => sha256(w.value.apiKey) === row.apiKeyHash)).toHaveLength(1);
       for (const r of results) if (r.status === 'rejected') expect(r.reason).toBeInstanceOf(RotationError);
+    });
+
+    it('a rotation that started before another one finished is refused, so no command prints a key that is already replaced', async () => {
+      const t = await mkTenant('overlap');
+      const early = new Date(Date.now() - 5_000); // B starts here...
+      const first = await rotateTenantKey(prisma, t.id); // ...A commits after that...
+      // ...and B only reads the tenant now: it must not go on to replace A's key
+      await expect(rotateTenantKey(prisma, t.id, { now: early })).rejects.toBeInstanceOf(RotationError);
+      expect(await status(first.apiKey)).toBe(200); // A's key is still the one that works
+      // a rotation that starts after A has finished is a new rotation and goes through
+      const later = await rotateTenantKey(prisma, t.id);
+      expect(await status(later.apiKey)).toBe(200);
+      expect(await status(first.apiKey)).toBe(401);
     });
 
     it('the command prints a working key once, and fails clearly on bad input', async () => {
