@@ -132,6 +132,9 @@ export class EnvKeyProvider implements KeyProvider {
   }
 }
 
+/** Internal: the data key was wrapped by a key other than the current one. */
+class NotCurrentKeyError extends Error {}
+
 type Kms = Pick<KMSClient, 'send'>;
 
 export interface KmsOptions {
@@ -145,6 +148,13 @@ export interface KmsOptions {
    */
   cacheSeconds?: number;
   maxCached?: number;
+  /**
+   * Keys that wrapped data keys earlier and are no longer the current one (after switching to a new
+   * key or alias target). Objects are still opened with them, tried after the current key, and are
+   * re-encrypted under the current key by `storage:reencrypt`. New data is only ever sealed with
+   * `keyId`. The role needs `kms:Decrypt` on these keys as well.
+   */
+  previousKeyIds?: string[];
   /** The master key, only so objects written before KMS was switched on can still be read (and re-encrypted). */
   legacy?: EnvKeyProvider;
   now?: () => number;
@@ -155,7 +165,9 @@ const UNAVAILABLE = new Set([
   'ThrottlingException', 'LimitExceededException', 'KMSInternalException', 'DependencyTimeoutException', 'ServiceUnavailableException',
   'CredentialsProviderError', 'UnrecognizedClientException', 'ExpiredTokenException', 'InvalidGrantTokenException',
 ]);
-const CORRUPT = new Set(['InvalidCiphertextException', 'IncorrectKeyException', 'InvalidKeyUsageException']);
+// IncorrectKeyException is not here: it means "this ciphertext was wrapped by another key than the
+// one asked for", which is a configuration matter (a rotated or changed key), not damaged data
+const CORRUPT = new Set(['InvalidCiphertextException', 'InvalidKeyUsageException']);
 
 /**
  * Envelope encryption with AWS KMS. Every object gets its own random data key; KMS wraps it, and
@@ -181,14 +193,18 @@ export class KmsKeyProvider implements KeyProvider {
     this.now = opts.now ?? Date.now;
   }
 
+  private classify(err: unknown): Error {
+    const name = (err as Error).name;
+    if (CORRUPT.has(name)) return new StoredObjectCorruptError();
+    // Anything else (network, timeouts, the cases above) is "try again later", never a verdict on the data
+    return new KeyUnavailableError(UNAVAILABLE.has(name) ? `The encryption key service refused or could not complete the request (${name})` : undefined);
+  }
+
   private async call<T>(fn: () => Promise<T>): Promise<T> {
     try {
       return await fn();
     } catch (err) {
-      const name = (err as Error).name;
-      if (CORRUPT.has(name)) throw new StoredObjectCorruptError();
-      // Anything else (network, timeouts, the cases above) is "try again later", never a verdict on the data
-      throw new KeyUnavailableError(UNAVAILABLE.has(name) ? `The encryption key service refused or could not complete the request (${name})` : undefined);
+      throw this.classify(err);
     }
   }
 
@@ -231,7 +247,7 @@ export class KmsKeyProvider implements KeyProvider {
   }
 
   /** Opens the KMS format only. The data key's lifetime belongs to this call: it is zeroed afterwards. */
-  async openStrict(sealed: Buffer, ctx: SealContext): Promise<Buffer> {
+  async openStrict(sealed: Buffer, ctx: SealContext, currentKeyOnly = false): Promise<Buffer> {
     const wrappedLen = sealed.length >= 6 && formatOf(sealed) === 'kms-v1' ? sealed.readUInt16BE(4) : 0;
     const start = 6 + wrappedLen;
     if (wrappedLen === 0 || sealed.length < start + IV + TAG) throw new StoredObjectCorruptError();
@@ -239,7 +255,7 @@ export class KmsKeyProvider implements KeyProvider {
     const iv = sealed.subarray(start, start + IV);
     const tag = sealed.subarray(start + IV, start + IV + TAG);
     const body = sealed.subarray(start + IV + TAG);
-    const dek = await this.unwrap(wrapped, ctx);
+    const dek = await this.unwrap(wrapped, ctx, currentKeyOnly);
     try {
       return gcmDecrypt(dek, iv, tag, body, ctx.aad);
     } finally {
@@ -252,20 +268,37 @@ export class KmsKeyProvider implements KeyProvider {
    * cache on, a separate copy is what is remembered, so an expiry or eviction can never zero a key
    * another read is in the middle of using.
    */
-  private async unwrap(wrapped: Buffer, ctx: SealContext): Promise<Buffer> {
+  private async unwrap(wrapped: Buffer, ctx: SealContext, currentKeyOnly = false): Promise<Buffer> {
     // The context is part of the cache key: a hit can never serve a key for a different tenant or session
     const id = createHash('sha256').update(wrapped).update('\0').update(JSON.stringify(Object.entries(ctx.kmsContext).sort())).digest('hex');
-    const hit = this.cache.get(id);
+    // Asking "is this under the current key?" must not be answered from a cache filled by any key
+    const hit = currentKeyOnly ? undefined : this.cache.get(id);
     if (hit && hit.expires > this.now()) return Buffer.from(hit.key);
     if (hit) this.drop(id);
 
-    const res = await this.call(() =>
-      this.client.send(new DecryptCommand({ CiphertextBlob: wrapped, KeyId: this.opts.keyId, EncryptionContext: ctx.kmsContext })),
-    );
-    if (!res.Plaintext) throw new KeyUnavailableError();
-    const key = Buffer.from(res.Plaintext);
-    res.Plaintext.fill(0);
-    if (this.ttlMs > 0) {
+    // The current key first, then earlier ones. Naming a key lets KMS refuse a data key that some
+    // other key wrapped; IncorrectKeyException just means "not this one, try the next".
+    let plain: Uint8Array | undefined;
+    let answered = false;
+    for (const keyId of currentKeyOnly ? [this.opts.keyId] : [this.opts.keyId, ...(this.opts.previousKeyIds ?? [])]) {
+      try {
+        plain = (await this.client.send(new DecryptCommand({ CiphertextBlob: wrapped, KeyId: keyId, EncryptionContext: ctx.kmsContext }))).Plaintext;
+        answered = true;
+        break;
+      } catch (err) {
+        if ((err as Error).name === 'IncorrectKeyException') continue;
+        throw this.classify(err);
+      }
+    }
+    if (!answered && currentKeyOnly) throw new NotCurrentKeyError();
+    if (!answered) {
+      // Wrapped by a key we were not told about. The object is intact; the configuration is incomplete.
+      throw new KeyUnavailableError('This object was encrypted with a different KMS key than the configured ones; add the old key to KMS_PREVIOUS_KEY_IDS');
+    }
+    if (!plain) throw new KeyUnavailableError();
+    const key = Buffer.from(plain);
+    plain.fill(0);
+    if (this.ttlMs > 0 && !currentKeyOnly) {
       if (this.cache.size >= this.max) this.drop(this.cache.keys().next().value as string); // oldest first
       this.cache.set(id, { key: Buffer.from(key), expires: this.now() + this.ttlMs });
     }
@@ -284,9 +317,12 @@ export class KmsKeyProvider implements KeyProvider {
 
   async isCurrent(sealed: Buffer, ctx: SealContext): Promise<boolean> {
     try {
-      (await this.openStrict(sealed, ctx)).fill(0);
+      // Only the current key counts: an object that opens only with a previous key is readable but
+      // not current, which is what storage:reencrypt looks for
+      (await this.openStrict(sealed, ctx, true)).fill(0);
       return true;
     } catch (err) {
+      if (err instanceof NotCurrentKeyError) return false;
       // Not being able to reach KMS says nothing about the object: let the caller see that
       if (err instanceof KeyUnavailableError) throw err;
       return false;

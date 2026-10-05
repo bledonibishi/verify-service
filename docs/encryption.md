@@ -67,6 +67,17 @@ KMS has a small monthly fee per key plus a small fee per request; check the curr
 
 Switching back from `kms` to `env` is not supported without re-encrypting first.
 
+## Changing the KMS key
+
+Each stored object carries its wrapped data key, and KMS only unwraps it with the key that wrapped it. If `KMS_KEY_ID` is pointed at a different key, or an alias is repointed, objects written under the old key can no longer be opened unless the service is told about it:
+
+1. Give the service role `kms:Decrypt` on the old key as well as `kms:GenerateDataKey` and `kms:Decrypt` on the new one.
+2. Set `KMS_KEY_ID` to the new key and `KMS_PREVIOUS_KEY_IDS` to the old one (ARN or alias; several allowed, separated by commas or spaces). The current key is tried first, then the previous ones. **New data is only ever written under `KMS_KEY_ID`.**
+3. Run `pnpm storage:reencrypt` (`--dry-run` first; see above). It counts an object as current only if the *current* key opens it, so everything written under an old key is rewritten.
+4. When no object remains under the old key (the dry run reports none stale), remove it from `KMS_PREVIOUS_KEY_IDS` and revoke the permission.
+
+An object wrapped by a key that is not listed is reported as **unavailable with a hint to set `KMS_PREVIOUS_KEY_IDS`**, never as corrupt: the data is intact, the configuration is incomplete. Real damage (an altered ciphertext, a wrong tenant or session) is still reported as corrupt.
+
 ## Operations
 
 - **Alarm on KMS use.** Create a CloudWatch alarm on CloudTrail `Decrypt` events for this key (count per hour well above normal) and on `AccessDenied`. That is the main detection a stolen role will trip.

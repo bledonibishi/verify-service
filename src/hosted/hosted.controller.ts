@@ -29,7 +29,10 @@ export class HostedController {
       'Cache-Control': 'no-store',
       // The camera is the point of the page; everything else is off
       'Permissions-Policy': 'camera=(self), microphone=(), geolocation=()',
-      ...(safe ? {} : { 'X-Frame-Options': 'DENY' }),
+      // X-Frame-Options cannot list origins, so with an allowlist it is SAMEORIGIN: browsers that
+      // understand frame-ancestors ignore it and use the list; an old browser that does not is
+      // refused embedding by anyone else instead of being left unprotected
+      'X-Frame-Options': safe ? 'SAMEORIGIN' : 'DENY',
     };
   }
 

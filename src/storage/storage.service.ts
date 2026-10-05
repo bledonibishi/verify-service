@@ -89,6 +89,8 @@ export class StorageService implements DocumentStorage {
     const cache = parseInt(config.get<string>('KMS_DEK_CACHE_SECONDS') ?? '', 10);
     return new KmsKeyProvider(new KMSClient({ region, ...(id && secret ? { credentials: { accessKeyId: id, secretAccessKey: secret } } : {}) }), {
       keyId,
+      // Earlier keys, so data written before a key change stays readable and can be re-encrypted
+      previousKeyIds: (config.get<string>('KMS_PREVIOUS_KEY_IDS') ?? '').split(/[\s,]+/).filter(Boolean),
       // Off unless asked for: see KmsOptions.cacheSeconds for what a cache costs in revocation and audit
       cacheSeconds: Number.isFinite(cache) && cache >= 0 ? cache : 0,
       // Only to read (and re-encrypt) objects written before KMS was switched on
@@ -127,6 +129,7 @@ export class StorageService implements DocumentStorage {
       prefix: config.get<string>('S3_KEY_PREFIX'),
       serverSideEncryption: sse as 'AES256' | 'aws:kms' | 'none',
       kmsKeyId: config.get<string>('S3_KMS_KEY_ID'),
+      versioningCheck: config.get<string>('S3_VERSIONING_CHECK') === 'off' ? 'off' : 'auto',
     });
   }
 

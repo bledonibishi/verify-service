@@ -25,6 +25,18 @@ describe('parseLicenceFields', () => {
     expect(r.repaired).toBe(false);
   });
 
+  it('does not read a date that has letters or digits glued to it', () => {
+    const glued = (suffix: string, prefix = '') => parseLicenceFields(`1. TESTI\n2. DEMA\n3. 15.05.1990 PRISHTINE\n4a. ${prefix}12.03.2022${suffix}\n4b. 12.03.2032\n4d. 1000000001\n5. DL1234567\n9. B`);
+    for (const suffix of ['GARBAGE', 'X', 'B1', '7']) {
+      const r = glued(suffix);
+      expect(r.found).not.toContain('4a');
+      expect(r.fields.issueDate).toBeUndefined();
+    }
+    expect(glued('', 'X').found).not.toContain('4a');
+    // spaces and the usual neighbours are fine
+    for (const ok of [glued(''), glued(' '), glued(' 4b.')]) expect(ok.fields.issueDate).toBe('2022-03-12');
+  });
+
   it('does not mistake dates for field labels, and reads fields in any order and layout', () => {
     // Field 3 holds a date that itself contains "5." and "3."; everything on one line is also fine
     const r = parseLicenceFields('1. TESTI 2. DEMA 3. 05.03.1990 PRISHTINE 4a. 12.03.2022 4b. 12.03.2032 4d. 1000000001 5. DL1234567 9. B');
