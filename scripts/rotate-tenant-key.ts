@@ -15,7 +15,14 @@ async function main() {
   const args = process.argv.slice(2);
   const id = args.find((a) => !a.startsWith('--'));
   const graceFlag = args.find((a) => a.startsWith('--grace-hours='));
-  const graceHours = graceFlag ? Number(graceFlag.split('=')[1]) : 0;
+  const graceText = graceFlag?.split('=')[1];
+  // Strict: an empty or non-numeric value must not quietly mean "no grace period", which would
+  // switch off the old key during a rollout the operator meant to be gradual
+  if (graceFlag && !/^\d+(\.\d+)?$/.test(graceText ?? '')) {
+    console.error('--grace-hours needs a number of hours, for example --grace-hours=24');
+    process.exit(1);
+  }
+  const graceHours = graceText ? Number(graceText) : 0;
   const known = (a: string) => a === '--webhook-secret' || a.startsWith('--grace-hours=');
   const unknown = args.find((a) => a.startsWith('--') && !known(a));
   if (!id || unknown) {
@@ -30,7 +37,9 @@ async function main() {
     console.log(r.oldKeyValidUntil ? `The old key keeps working until ${r.oldKeyValidUntil.toISOString()}.` : 'The old key stopped working now.');
     console.log('Store these now; they cannot be shown again.');
   } catch (err) {
-    console.error(err instanceof RotationError ? err.message : 'Could not rotate the key');
+    // Never the raw message: a database error can quote the values being written, including the new secret
+    const code = (err as { code?: unknown }).code;
+    console.error(err instanceof RotationError ? err.message : `Could not rotate the key: ${(err as Error).name}${typeof code === 'string' ? ` (${code})` : ''}. Nothing was changed unless a new key was printed above.`);
     process.exitCode = 1;
   } finally {
     await prisma.$disconnect();

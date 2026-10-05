@@ -19,8 +19,10 @@ export class RotationError extends Error {}
  * until then, so the tenant can deploy the new key without downtime. Rotating again during a grace
  * period ends the earlier key at once: at most one old key is ever valid.
  *
- * The update only applies if the key it replaces is still the current one, so two rotations at the
- * same time cannot both succeed and hand out keys of which one is silently dead.
+ * The update only applies if the key it replaces is still the current one, so two rotations that
+ * read the same key cannot both succeed. Rotations that follow each other are not prevented: the
+ * later one replaces the earlier one's key, as rotating always does, so a key printed by a command
+ * that lost that order no longer works. Run one rotation at a time.
  */
 export async function rotateTenantKey(
   prisma: Pick<PrismaClient, 'tenant'>,

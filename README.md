@@ -34,7 +34,7 @@ pnpm start:dev                          # http://localhost:4100
 
 `tenant:create` prints the API key and webhook secret once. Only a hash of the key is stored.
 
-**Rotating a key.** `pnpm tenant:rotate-key <tenantId>` issues a new API key and stops the old one at once (use this after a leak). `--grace-hours=24` (max 168) keeps the old key working for that long so the tenant can deploy the new one without downtime; rotating again during a grace period ends the earlier key, so at most one old key is ever valid. `--webhook-secret` also replaces the webhook signing secret; events (including retries of queued ones) are signed with the new secret from then on, so the tenant must update its verifier at the same time. The new key is printed once and only its hash is stored.
+**Rotating a key.** `pnpm tenant:rotate-key <tenantId>` issues a new API key and stops the old one at once (use this after a leak). `--grace-hours=24` (max 168) keeps the old key working for that long so the tenant can deploy the new one without downtime; rotating again during a grace period ends the earlier key, so at most one old key is ever valid. `--webhook-secret` also replaces the webhook signing secret; events (including retries of queued ones) are signed with the new secret from then on, so the tenant must update its verifier at the same time. The new key is printed once and only its hash is stored. Rotating always replaces the current key, so run one rotation at a time: if two commands overlap, the later one wins and the earlier one's key no longer works.
 
 ## API
 

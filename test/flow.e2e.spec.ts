@@ -3469,7 +3469,7 @@ describe('verification flow (e2e)', () => {
       expect((await prisma.tenant.findUniqueOrThrow({ where: { id: t.id } })).webhookSecret).toBe(both.webhookSecret);
     });
 
-    it('two rotations at the same moment: one wins, the other is told to retry, and the winner key works', async () => {
+    it('two rotations that read the same key: only one applies, there is exactly one current key', async () => {
       const t = await mkTenant('race');
       const results = await Promise.allSettled([rotateTenantKey(prisma, t.id), rotateTenantKey(prisma, t.id)]);
       const won = results.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof rotateTenantKey>>> => r.status === 'fulfilled');
@@ -3490,6 +3490,8 @@ describe('verification flow (e2e)', () => {
       expect((await run([randomUUID()])).code).toBe(1);
       expect((await run([t.id, '--grace-hours=999'])).code).toBe(1);
       expect((await run([t.id, '--nonsense'])).code).toBe(1);
+      // an empty or non-numeric grace value must not silently mean "no grace period"
+      for (const bad of ['--grace-hours=', '--grace-hours=abc', '--grace-hours=-1', '--grace-hours=1e3']) expect((await run([t.id, bad])).code).toBe(1);
       expect((await run([])).code).toBe(1);
       // the failed runs changed nothing
       expect(await status(key)).toBe(200);
