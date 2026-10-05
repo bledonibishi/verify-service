@@ -74,6 +74,7 @@ Contents (replace the values; the variable names are explained in `.env.example`
 
 ```
 PORT=4100
+HOST=127.0.0.1
 DATABASE_URL=postgresql://verify_app:PASTE-THE-DB-PASSWORD@127.0.0.1:5432/verify
 PUBLIC_BASE_URL=https://verify.yourdomain.com
 TRUST_PROXY=1
@@ -98,7 +99,7 @@ AWS_ACCESS_KEY_ID=<face-match user key id>
 AWS_SECRET_ACCESS_KEY=<face-match user secret>
 ```
 
-Type the values in by hand on the server (or copy the file with `scp`); do not paste them into a chat. `TRUST_PROXY=1` is required: without it every visitor shares Caddy's address and the login rate limit applies to everyone at once.
+Type the values in by hand on the server (or copy the file with `scp`); do not paste them into a chat. `TRUST_PROXY=1` is required: without it every visitor shares Caddy's address and the login rate limit applies to everyone at once. `HOST=127.0.0.1` goes with it: the service then only accepts connections from Caddy on the same machine, so nobody can reach it directly and fake the forwarded address (the firewall closes port 4100 too, but this does not depend on it).
 
 Create the tables:
 
@@ -157,10 +158,10 @@ Caddy gets a free certificate from Let's Encrypt on its own and renews it. Open 
 
 ```sh
 cd /opt/verify-service
-sudo bash -c 'set -a; . /etc/verify-service.env; set +a; sudo -E -u verify pnpm tenant:create "pharmacy" https://pharmacy.example/webhooks/verify'
+sudo bash -c 'set -a; . /etc/verify-service.env; set +a; sudo -E -u verify pnpm tenant:create "pharmacy" https://<pharmacy-backend>/verify/webhook'
 ```
 
-This prints the API key and webhook secret once: store them in the pharmacy software's secret store and nowhere else. Then a reviewer account for each pharmacist (the password is shown once):
+Use the address where the pharmacy backend receives webhooks (its test environment first). It can be changed later without new keys: `pnpm tenant:update <tenantId> --webhook-url=https://…`. This prints the API key and webhook secret once: store them in the pharmacy software's secret store and nowhere else. Then a reviewer account for each pharmacist (the password is shown once):
 
 ```sh
 sudo bash -c 'set -a; . /etc/verify-service.env; set +a; sudo -E -u verify pnpm reviewer create <tenantId> pharmacist@example.com "Name"'
@@ -172,12 +173,29 @@ The reviewers sign in at `https://verify.yourdomain.com/review` and set up their
 ## 8. Backups and updates
 
 - **Snapshots:** the automatic Lightsail snapshots from section 1 cover the whole machine.
-- **A database dump as well** (restoring a dump is easier than a whole snapshot):
+- **A database dump as well** (restoring a dump is easier than a whole snapshot). A small script, so a failed dump is never mistaken for a good one and never causes old good dumps to be deleted:
   ```sh
   sudo mkdir -p /var/backups/verify && sudo chmod 700 /var/backups/verify
-  echo '30 2 * * * root sudo -u postgres pg_dump verify | gzip > /var/backups/verify/verify-$(date +\%F).sql.gz && find /var/backups/verify -mtime +7 -delete' | sudo tee /etc/cron.d/verify-backup
+  sudo tee /usr/local/bin/verify-backup >/dev/null <<'SCRIPT'
+  #!/bin/bash
+  set -euo pipefail
+  dir=/var/backups/verify
+  tmp=$(mktemp "$dir/.partial.XXXXXX")
+  trap 'rm -f "$tmp"' EXIT
+  # pipefail: a failing pg_dump fails the whole line, even though gzip succeeded
+  sudo -u postgres pg_dump --no-owner verify | gzip > "$tmp"
+  gzip -t "$tmp"                                    # the archive is readable
+  [ "$(gzip -dc "$tmp" | head -c 100 | wc -c)" -gt 0 ]   # and not empty
+  mv "$tmp" "$dir/verify-$(date +%F).sql.gz"
+  trap - EXIT
+  # Only after a good dump: delete dumps older than 7 days, always keeping the newest 7
+  ls -1t "$dir"/verify-*.sql.gz | tail -n +8 | while read -r f; do find "$f" -mtime +7 -delete; done
+  SCRIPT
+  sudo chmod 700 /usr/local/bin/verify-backup
+  echo '30 2 * * * root /usr/local/bin/verify-backup || logger -t verify-backup "database backup FAILED"' | sudo tee /etc/cron.d/verify-backup
+  sudo /usr/local/bin/verify-backup && ls -l /var/backups/verify   # run it once now
   ```
-  The dump holds results and the names and birth dates tenants supplied, no photos. Treat it like the database. Test a restore once.
+  A failure is written to the system log (`journalctl -t verify-backup`). The dump holds results and the names and birth dates tenants supplied, no photos. Treat it like the database. Test a restore once.
 - **The photos** live in S3 (encrypted, with KMS); they are not on the server.
 - **Updating:**
   ```sh
@@ -194,7 +212,7 @@ The reviewers sign in at `https://verify.yourdomain.com/review` and set up their
 
 1. `sudo bash -c 'set -a; . /etc/verify-service.env; set +a; sudo -E -u verify pnpm storage:check'` → all checks pass (needs the `s3:GetBucketVersioning` permission, see [storage](storage.md)).
 2. Create a session with the API key (`curl` as in [safe-testing](safe-testing.md), but with `https://verify.yourdomain.com`), open the `hostedUrl` **on a phone** and upload fake photos, then sign in at `/review` and decide the case.
-3. Confirm the webhook arrived at the pharmacy test endpoint, and `GET /v1/sessions/<id>` shows the final status.
+3. Confirm the webhook arrived at the pharmacy test endpoint (the tenant's webhook address must point there: `pnpm tenant:update <tenantId> --webhook-url=…`), and `GET /v1/sessions/<id>` shows the final status. `GET /v1/webhook-events` shows each delivery and, if one failed, why (`http_404`, `network`, …).
 4. Open `https://verify.yourdomain.com/review` and `/verify` in a browser's developer tools: no mixed-content warnings.
 5. Only now give the pharmacy the real base URL, API key and webhook secret ([pharmacy-integration](pharmacy-integration.md)).
 
