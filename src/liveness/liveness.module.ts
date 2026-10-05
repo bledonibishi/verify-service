@@ -25,7 +25,9 @@ export function createLivenessProvider(config: ConfigService): LivenessProvider 
     const id = config.get<string>('LIVENESS_ACCESS_KEY_ID');
     const secret = config.get<string>('LIVENESS_SECRET_ACCESS_KEY');
     if (!!id !== !!secret) throw new Error('Set both LIVENESS_ACCESS_KEY_ID and LIVENESS_SECRET_ACCESS_KEY, or neither');
-    const seconds = parseInt(config.get<string>('LIVENESS_CREDENTIAL_SECONDS') ?? '', 10);
+    const rawSeconds = config.get<string>('LIVENESS_CREDENTIAL_SECONDS');
+    const seconds = rawSeconds ? Number(rawSeconds) : NaN;
+    if (rawSeconds && !Number.isInteger(seconds)) throw new Error('LIVENESS_CREDENTIAL_SECONDS must be a whole number of seconds (900 to 3600)');
     return AwsLivenessProvider.forRegion(region, roleArn, id && secret ? { accessKeyId: id, secretAccessKey: secret } : undefined, Number.isFinite(seconds) ? seconds : undefined);
   }
   throw new Error(`Unknown LIVENESS_PROVIDER "${name}"`);

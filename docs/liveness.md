@@ -26,7 +26,7 @@ pipeline ── GetFaceLivenessSessionResults ──▶ confidence + one referen
 - **No long-lived key reaches a browser.** The credentials are short-lived (15 minutes), limited by a session policy to starting a liveness stream, and sent only to the browser that started that session. The reply is `Cache-Control: no-store`, and nothing logs it.
 - **No audit images are requested and no S3 bucket is involved.** The reference image comes back in the reply and stays in memory only, used for the face match against the ID front (so the match is against the person who passed the challenge, not the uploaded selfie).
 - **What the verdict means.** A finished session has a confidence score. A score below the tenant's minimum (default 90; `--liveness-threshold`) counts as *not live* and the case goes to review. A session that was not finished, expired or unknown counts as *incomplete*, never as live. Nothing is rejected automatically.
-- **Cost.** AWS bills per check, whether it passes or fails ([pricing page](https://aws.amazon.com/rekognition/pricing/)).
+- **Cost.** AWS bills per check, whether it passes or fails ([pricing page](https://aws.amazon.com/rekognition/pricing/)). One link may start at most **5** challenges (`POST …/liveness` then answers `429` with `code: "liveness_attempts_exceeded"`), so a repeated or scripted start cannot create provider sessions without end; the browser credentials are issued before the session is created, so a refused request leaves nothing behind. `LIVENESS_CREDENTIAL_SECONDS` must be 900 to 3600 (an IAM role allows one hour unless its maximum session duration is raised).
 
 ## Region and data protection
 

@@ -53,8 +53,10 @@ describe('AwsLivenessProvider.createSession', () => {
     expect(create.ClientRequestToken).toMatch(/^[0-9a-f-]{36}$/);
     const assume = sent.find((c) => c.cmd === 'assume')!.input as { RoleArn: string; RoleSessionName: string; DurationSeconds: number; Policy: string };
     expect(assume.RoleArn).toBe(ROLE);
-    expect(assume.RoleSessionName).toBe('liveness-live-session-1');
-    expect(assume.DurationSeconds).toBeGreaterThanOrEqual(900);
+    expect(assume.RoleSessionName).toMatch(/^liveness-[0-9a-f-]{36}$/); // random, nothing about the person
+    expect(assume.DurationSeconds).toBe(900);
+    // credentials first, then the session: a refusal from STS leaves no session behind
+    expect(sent.map((c) => c.cmd)).toEqual(['assume', 'create']);
     // the session policy allows exactly one action
     expect(JSON.parse(assume.Policy).Statement).toEqual([{ Effect: 'Allow', Action: 'rekognition:StartFaceLivenessSession', Resource: '*' }]);
   });
@@ -64,14 +66,21 @@ describe('AwsLivenessProvider.createSession', () => {
     const b = fakes();
     await a.provider.createSession();
     await b.provider.createSession();
-    expect((a.sent[0].input as { ClientRequestToken: string }).ClientRequestToken).not.toBe((b.sent[0].input as { ClientRequestToken: string }).ClientRequestToken);
+    const tokenOf = (f: ReturnType<typeof fakes>) => (f.sent.find((c) => c.cmd === 'create')!.input as { ClientRequestToken: string }).ClientRequestToken;
+    expect(tokenOf(a)).not.toBe(tokenOf(b));
   });
 
-  it('keeps the role session name valid however odd the provider id is', async () => {
-    const { provider, sent } = fakes({ create: () => ({ SessionId: 'a b/c!' + 'x'.repeat(100) }) });
-    await provider.createSession();
-    const name = (sent.find((c) => c.cmd === 'assume')!.input as { RoleSessionName: string }).RoleSessionName;
-    expect(name).toMatch(/^[\w+=,.@-]{2,64}$/);
+  it('creates no Rekognition session when the browser credentials are refused', async () => {
+    const { provider, sent } = fakes({ assume: () => { throw err('AccessDenied'); } });
+    await expect(provider.createSession()).rejects.toBeInstanceOf(LivenessUnavailableError);
+    expect(sent.map((c) => c.cmd)).toEqual(['assume']);
+  });
+
+  it('accepts a credential lifetime only within what a role allows by default', () => {
+    const make = (credentialSeconds: number) => new AwsLivenessProvider({} as never, {} as never, { region: 'eu-west-1', browserRoleArn: ROLE, credentialSeconds });
+    expect(() => make(900)).not.toThrow();
+    expect(() => make(3600)).not.toThrow();
+    for (const bad of [0, 899, 3601, 43_200, NaN]) expect(() => make(bad)).toThrow('LIVENESS_CREDENTIAL_SECONDS');
   });
 
   it.each(['AccessDeniedException', 'UnrecognizedClientException', 'ExpiredTokenException', 'CredentialsProviderError'])('reports %s as "unavailable" (retrying will not help)', async (name) => {
@@ -148,5 +157,8 @@ describe('LIVENESS_PROVIDER configuration', () => {
     await expect(build({ LIVENESS_PROVIDER: 'aws', LIVENESS_BROWSER_ROLE_ARN: 'nope' })).rejects.toThrow('LIVENESS_BROWSER_ROLE_ARN');
     await expect(build({ LIVENESS_PROVIDER: 'aws', LIVENESS_BROWSER_ROLE_ARN: ROLE, LIVENESS_ACCESS_KEY_ID: 'AKIA' })).rejects.toThrow('both');
     await expect(build({ LIVENESS_PROVIDER: 'nonsense' })).rejects.toThrow('Unknown LIVENESS_PROVIDER');
+    await expect(build({ LIVENESS_PROVIDER: 'aws', LIVENESS_BROWSER_ROLE_ARN: ROLE, LIVENESS_CREDENTIAL_SECONDS: '7200' })).rejects.toThrow('LIVENESS_CREDENTIAL_SECONDS');
+    await expect(build({ LIVENESS_PROVIDER: 'aws', LIVENESS_BROWSER_ROLE_ARN: ROLE, LIVENESS_CREDENTIAL_SECONDS: 'ten' })).rejects.toThrow('LIVENESS_CREDENTIAL_SECONDS');
+    expect((await build({ LIVENESS_PROVIDER: 'aws', LIVENESS_BROWSER_ROLE_ARN: ROLE, LIVENESS_CREDENTIAL_SECONDS: '1800' })).name).toBe('aws');
   });
 });

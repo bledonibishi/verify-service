@@ -52,7 +52,7 @@ pnpm start:dev                          # http://localhost:4100
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/v1/upload/:token/:kind` | Multipart field `file` (JPEG/PNG/WebP, max 8 MB). `kind` is `ID_FRONT`, `ID_BACK`, `SELFIE`, `LICENCE_FRONT` or `LICENCE_BACK`. Re-uploading replaces the earlier file. |
-| `POST` | `/v1/upload/:token/liveness` | Start a liveness challenge. Returns `{ provider, sessionId, ... }` for the client widget. `501` if no provider is configured; `410` once the session is submitted or expired, `409` if another start won a concurrent race (retry). Calling again later replaces the earlier challenge. |
+| `POST` | `/v1/upload/:token/liveness` | Start a liveness challenge. Returns `{ provider, sessionId, ... }` for the client widget. `501` if no provider is configured; `410` once the session is submitted or expired, `409` if another start won a concurrent race (retry), `429` with `code: "liveness_attempts_exceeded"` after 5 starts on one link. Calling again later replaces the earlier challenge. |
 | `POST` | `/v1/upload/:token/submit` | Finish. Requires `ID_FRONT` and `SELFIE`; `ID_BACK` is needed for the MRZ checks. A session created with `requireDrivingLicence` also needs `ID_BACK` and `LICENCE_FRONT`; licence uploads are refused for sessions that did not ask for one. Returns `PROCESSING` immediately. |
 
 Statuses: `PENDING`, `PROCESSING`, `NEEDS_REVIEW`, `APPROVED`, `REJECTED`, `EXPIRED`.

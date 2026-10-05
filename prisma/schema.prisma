@@ -82,6 +82,8 @@ model Session {
   expectedBirthDate String? @map("expected_birth_date")
   // Set when the user starts a liveness challenge; the result is read by the pipeline
   livenessSessionId String? @map("liveness_session_id")
+  // Challenges started for this link; capped so one link cannot create provider sessions without end
+  livenessStarts    Int     @default(0) @map("liveness_starts")
   // When true the user must also upload a driving licence, which is read and cross-checked with the ID
   requireLicence Boolean @default(false) @map("require_licence")
   expiresAt   DateTime      @map("expires_at")

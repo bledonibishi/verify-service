@@ -15,7 +15,10 @@ export interface AwsLivenessOptions {
   region: string;
   /** A role whose only permission is `rekognition:StartFaceLivenessSession`; the browser gets short-lived credentials for it. */
   browserRoleArn: string;
-  /** How long the browser's credentials live, in seconds (AWS minimum 900). */
+  /**
+   * How long the browser's credentials live, in seconds: 900 (AWS's minimum) to 3600 (the default
+   * maximum session duration of an IAM role; STS refuses anything longer than the role allows).
+   */
   credentialSeconds?: number;
 }
 
@@ -55,6 +58,9 @@ export class AwsLivenessProvider implements LivenessProvider {
     private readonly opts: AwsLivenessOptions,
   ) {
     if (!opts.region) throw new Error('LIVENESS_REGION is required when LIVENESS_PROVIDER=aws');
+    if (opts.credentialSeconds !== undefined && !(opts.credentialSeconds >= 900 && opts.credentialSeconds <= 3600)) {
+      throw new Error('LIVENESS_CREDENTIAL_SECONDS must be between 900 and 3600');
+    }
     if (!/^arn:aws[a-z-]*:iam::\d{12}:role\/.+/.test(opts.browserRoleArn ?? '')) {
       throw new Error('LIVENESS_BROWSER_ROLE_ARN must be the ARN of an IAM role (arn:aws:iam::<account>:role/<name>)');
     }
@@ -72,42 +78,35 @@ export class AwsLivenessProvider implements LivenessProvider {
   }
 
   async createSession(): Promise<LivenessSession> {
-    let sessionId: string;
+    // Credentials first: if STS refuses, no Rekognition session has been created for nothing
+    let credentials: { accessKeyId: string; secretAccessKey: string; sessionToken: string; expiration?: string };
     try {
-      const created = await this.rekognition.send(
-        new CreateFaceLivenessSessionCommand({ ClientRequestToken: randomUUID(), Settings: { AuditImagesLimit: 0 } }),
+      const assumed = await this.sts.send(
+        new AssumeRoleCommand({
+          RoleArn: this.opts.browserRoleArn,
+          // A random name: CloudTrail shows it, and it carries nothing about the person
+          RoleSessionName: `liveness-${randomUUID()}`,
+          DurationSeconds: this.opts.credentialSeconds ?? 900,
+          Policy: BROWSER_POLICY,
+        }),
       );
-      if (!created.SessionId) throw new LivenessUnavailableError('liveness provider returned no session');
-      sessionId = created.SessionId;
+      const c = assumed.Credentials;
+      if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken) throw new LivenessUnavailableError('liveness provider returned no credentials');
+      credentials = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken, expiration: c.Expiration?.toISOString() };
     } catch (err) {
       if (err instanceof LivenessUnavailableError) throw err;
       return this.unavailable(err);
     }
 
     try {
-      const assumed = await this.sts.send(
-        new AssumeRoleCommand({
-          RoleArn: this.opts.browserRoleArn,
-          // Shows up in CloudTrail; the provider's session id is a random UUID, not personal data
-          RoleSessionName: `liveness-${sessionId}`.replace(/[^\w+=,.@-]/g, '-').slice(0, 64),
-          DurationSeconds: Math.max(900, this.opts.credentialSeconds ?? 900),
-          Policy: BROWSER_POLICY,
-        }),
+      const created = await this.rekognition.send(
+        new CreateFaceLivenessSessionCommand({ ClientRequestToken: randomUUID(), Settings: { AuditImagesLimit: 0 } }),
       );
-      const c = assumed.Credentials;
-      if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken) throw new LivenessUnavailableError('liveness provider returned no credentials');
+      if (!created.SessionId) throw new LivenessUnavailableError('liveness provider returned no session');
       return {
-        providerSessionId: sessionId,
-        clientConfig: {
-          region: this.opts.region,
-          // Short-lived and limited to starting a liveness stream. Sent to this one browser only, never logged or stored.
-          credentials: {
-            accessKeyId: c.AccessKeyId,
-            secretAccessKey: c.SecretAccessKey,
-            sessionToken: c.SessionToken,
-            expiration: c.Expiration?.toISOString(),
-          },
-        },
+        providerSessionId: created.SessionId,
+        // Short-lived and limited to starting a liveness stream. Sent to this one browser only, never logged or stored.
+        clientConfig: { region: this.opts.region, credentials },
       };
     } catch (err) {
       if (err instanceof LivenessUnavailableError) throw err;
