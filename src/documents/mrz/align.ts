@@ -213,3 +213,27 @@ export function approximateTd1Candidates(ocrText: string): ApproximateTd1[] {
 export function extractApproximateTd1(ocrText: string): ApproximateTd1 | null {
   return approximateTd1Candidates(ocrText)[0] ?? null;
 }
+
+/**
+ * Writes the fixed characters of the layout (the I, and RKS twice) where OCR gave an accepted
+ * look-alike, on lines that already have the right length. Returns the same lines when nothing
+ * needed fixing. No check digit covers these positions.
+ */
+export function fixLayoutLiterals(lines: string[]): { lines: string[]; changed: boolean } {
+  let changed = false;
+  const out = lines.map((line, k) => {
+    if (k > 1 || line.length !== TEMPLATES[k].length) return line;
+    const chars = [...line];
+    TEMPLATES[k].forEach((slot, j) => {
+      if (slot.kind === 'lit') {
+        const f = fit(chars[j], slot);
+        if (f > 0 && f <= 0.4) {
+          chars[j] = slot.ch;
+          changed = true;
+        }
+      }
+    });
+    return chars.join('');
+  });
+  return { lines: out, changed };
+}
