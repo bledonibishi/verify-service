@@ -98,7 +98,7 @@ The token lives in the URL **fragment**, which browsers never send to servers, s
 
 ## Not covered yet
 
-- **Liveness.** The page does not run a liveness challenge (the provider's widget comes with the AWS adapter). Sessions therefore land in review rather than auto-approval.
+- **Liveness** is available with `LIVENESS_PROVIDER=aws` ([liveness](liveness.md)): the hosted page then asks for a face check instead of a selfie, with a selfie as a fallback. It has not yet been run on a real camera. Without it, sessions land in review rather than auto-approval. **If you build your own screens:** when `getSession()` says `liveness: true`, the selfie is optional and the face check replaces it; the face check itself currently only exists on the hosted page (`/verify/liveness`).
 - **No return redirect.** After submitting, the page says the user can close it; there is no `returnUrl`. Show your own screen when the webhook arrives, or poll.
 - **Camera guidance.** The page uses the native camera through the file picker: no live preview, edge detection or glare warning.
 - **Translations.** The Albanian and Serbian texts were written by the developer, not a native translator; have them reviewed before launch.

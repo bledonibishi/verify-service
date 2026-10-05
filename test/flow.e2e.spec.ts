@@ -1825,7 +1825,9 @@ describe('verification flow (e2e)', () => {
         return outbox.enqueue(tx, t, { sessionId, externalRef: 'ref', status });
       });
     const eventOf = (id: string) => prisma.webhookEvent.findUniqueOrThrow({ where: { id } });
-    const until = async (cond: () => Promise<boolean>, ms = 4000) => {
+    // A ceiling, not a delay: it returns as soon as the condition holds. Generous, because a busy
+    // machine running the whole suite in parallel can take seconds for a few delivery attempts.
+    const until = async (cond: () => Promise<boolean>, ms = 15_000) => {
       const end = Date.now() + ms;
       while (Date.now() < end) {
         if (await cond()) return;
@@ -1911,7 +1913,7 @@ describe('verification flow (e2e)', () => {
             dead: (await queue(td, await mkSession(td, 'd')))!,
           };
           void dispatcher.wake();
-          await until(async () => (await prisma.webhookEvent.count({ where: { id: { in: Object.values(ids) }, status: 'FAILED' } })) === 3, 9000);
+          await until(async () => (await prisma.webhookEvent.count({ where: { id: { in: Object.values(ids) }, status: 'FAILED' } })) === 3, 20_000);
           expect((await eventOf(ids.hang)).lastError).toBe('timeout');
           expect((await eventOf(ids.redir)).lastError).toBe('http_302');
           expect((await eventOf(ids.dead)).lastError).toBe('network');
@@ -2035,7 +2037,7 @@ describe('verification flow (e2e)', () => {
         const row = await eventOf(id);
         expect(row.claims).toBe(4);
         expect(row.lockedUntil).not.toBeNull(); // still leased to claim 4
-        await until(async () => (await eventOf(id)).status === 'DELIVERED', 5000);
+        await until(async () => (await eventOf(id)).status === 'DELIVERED', 15_000);
       } finally {
         jest.restoreAllMocks();
         await rx.close();
@@ -2212,10 +2214,12 @@ describe('verification flow (e2e)', () => {
           steps: [
             { kind: 'ID_FRONT', required: true },
             { kind: 'ID_BACK', required: false },
-            { kind: 'SELFIE', required: true },
+            // A liveness provider is configured in these tests: the face check replaces the selfie
+            { kind: 'SELFIE', required: false },
           ],
+          liveness: true,
+          livenessStarted: false,
         });
-        expect(typeof res.body.liveness).toBe('boolean');
         const dump = JSON.stringify(res.body);
         for (const secret of ['Dema', 'Testi', '1990', 'customer-ref-4711', plain.id]) expect(dump).not.toContain(secret);
       });
@@ -2225,7 +2229,7 @@ describe('verification flow (e2e)', () => {
         await request(http()).post(`/v1/upload/${lic.uploadToken}/ID_FRONT`).attach('file', PNG, { filename: 'a.png' }).expect(204);
         const res = await request(http()).get(`/v1/upload/${lic.uploadToken}`).expect(200);
         expect(res.body.steps.map((x: { kind: string; required: boolean }) => `${x.kind}:${x.required}`)).toEqual([
-          'ID_FRONT:true', 'ID_BACK:true', 'LICENCE_FRONT:true', 'LICENCE_BACK:false', 'SELFIE:true',
+          'ID_FRONT:true', 'ID_BACK:true', 'LICENCE_FRONT:true', 'LICENCE_BACK:false', 'SELFIE:false',
         ]);
         expect(res.body.uploaded).toEqual(['ID_FRONT']);
       });
@@ -3561,5 +3565,112 @@ describe('verification flow (e2e)', () => {
       // the failed runs changed nothing
       expect(await status(key)).toBe(200);
     }, 120_000);
+  });
+  describe('liveness in place of a selfie, and the face check page', () => {
+    const http = () => app.getHttpServer();
+    async function open(ref: string) {
+      const created = await request(http()).post('/v1/sessions').set(auth()).send({ externalRef: ref, firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' }).expect(201);
+      const token = created.body.uploadToken as string;
+      for (const kind of ['ID_FRONT', 'ID_BACK']) await request(http()).post(`/v1/upload/${token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
+      return { token, id: created.body.id as string };
+    }
+
+    beforeEach(() => {
+      ocrImpl = async () => ({ text: mrzText() });
+      faceImpl = goodFace;
+      liveImpl = goodLive;
+      faceName = 'fake-face';
+      liveName = 'fake-live';
+    });
+
+    it('will not submit without a face: neither a selfie nor a face check', async () => {
+      const { token } = await open('no-face');
+      const res = await request(http()).post(`/v1/upload/${token}/submit`).expect(400);
+      expect(res.body.message).toContain('liveness');
+    });
+
+    it('submits with a face check and no selfie, and matches the ID against the image from the challenge', async () => {
+      const { token, id } = await open('face-check-only');
+      expect((await request(http()).get(`/v1/upload/${token}`).expect(200)).body.livenessStarted).toBe(false);
+      await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
+      expect((await request(http()).get(`/v1/upload/${token}`).expect(200)).body.livenessStarted).toBe(true);
+      await request(http()).post(`/v1/upload/${token}/submit`).expect(200);
+      let result = null;
+      for (let i = 0; i < 800 && !result; i++) {
+        result = await prisma.verificationResult.findUnique({ where: { sessionId: id } });
+        if (!result) await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(result).not.toBeNull();
+      expect(result!.faceSource).toBe('liveness');
+      expect(result!.issueCodes).not.toContain('SELFIE_MISSING');
+      expect(result!.faceStatus).toBe('match');
+      expect(lastSelfie?.toString()).toBe('ref-from-challenge'); // the face match used the challenge's image
+    });
+
+    it('a face check that brings no image (and no selfie) is reported as a missing selfie, never as a match', async () => {
+      liveImpl = async () => ({ status: 'live', confidence: 97 });
+      const { token, id } = await open('face-check-no-image');
+      await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
+      await request(http()).post(`/v1/upload/${token}/submit`).expect(200);
+      let result = null;
+      for (let i = 0; i < 800 && !result; i++) {
+        result = await prisma.verificationResult.findUnique({ where: { sessionId: id } });
+        if (!result) await new Promise((r) => setTimeout(r, 25));
+      }
+      expect(result!.issueCodes).toContain('SELFIE_MISSING');
+      expect(result!.faceStatus).toBeNull();
+      expect(result!.decision).toBe('NEEDS_REVIEW');
+    });
+
+    it('serves the face check page with its own policy, and leaves the capture page strict', async () => {
+      const original = process.env.LIVENESS_REGION;
+      try {
+        delete process.env.LIVENESS_REGION;
+        const page = await request(http()).get('/verify/liveness').expect(200);
+        const csp = page.headers['content-security-policy'];
+        expect(csp).toContain("script-src 'self' 'wasm-unsafe-eval'");
+        expect(csp).toContain('wss://streaming-rekognition.eu-west-1.amazonaws.com');
+        expect(csp).toContain('https://cdn.liveness.rekognition.amazonaws.com');
+        expect(csp).toContain("frame-ancestors 'none'");
+        expect(csp).not.toContain('unsafe-inline');
+        expect(csp).not.toMatch(/'unsafe-eval'/);
+        expect(page.headers['cache-control']).toBe('no-store');
+        expect(page.text).toContain('/verify/liveness-widget.js');
+        expect(page.text).not.toMatch(/<script(?![^>]*\bsrc=)/i);
+        // the capture page itself is unchanged
+        const main = (await request(http()).get('/verify').expect(200)).headers['content-security-policy'];
+        expect(main).not.toContain('wasm');
+        expect(main).not.toContain('amazonaws');
+        process.env.LIVENESS_REGION = 'us-east-1';
+        expect((await request(http()).get('/verify/liveness')).headers['content-security-policy']).toContain('streaming-rekognition.us-east-1.amazonaws.com');
+        process.env.LIVENESS_REGION = 'eu-west-1; script-src *';
+        const bad = (await request(http()).get('/verify/liveness')).headers['content-security-policy'];
+        expect(bad).toContain('streaming-rekognition.eu-west-1.amazonaws.com');
+        expect(bad).not.toContain('script-src *');
+        const loader = await request(http()).get('/verify/liveness.js').expect(200);
+        expect(loader.text).not.toMatch(/innerHTML|outerHTML|document\.write|eval\(/);
+      } finally {
+        if (original === undefined) delete process.env.LIVENESS_REGION;
+        else process.env.LIVENESS_REGION = original;
+      }
+    });
+
+    it('serves the built widget, and answers 404 (not a crash) for a part that is not built', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'widget-'));
+      const original = process.env.LIVENESS_WIDGET_DIR;
+      try {
+        writeFileSync(join(dir, 'liveness-widget.js'), 'window.VerifyLiveness={mount:function(){}};');
+        process.env.LIVENESS_WIDGET_DIR = dir;
+        const js = await request(http()).get('/verify/liveness-widget.js').expect(200);
+        expect(js.headers['content-type']).toContain('javascript');
+        expect(js.headers['cache-control']).toBe('no-cache');
+        expect(js.text).toContain('VerifyLiveness');
+        await request(http()).get('/verify/liveness-widget.css').expect(404);
+      } finally {
+        if (original === undefined) delete process.env.LIVENESS_WIDGET_DIR;
+        else process.env.LIVENESS_WIDGET_DIR = original;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 });

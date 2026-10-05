@@ -7,10 +7,9 @@ Liveness checks that the selfie shows a real person in front of the camera, not 
 | Part | State |
 | --- | --- |
 | Server: create a session, hand the browser short-lived credentials, read the verdict, use the reference image for the face match | **Built and tested** with stand-ins for AWS (`src/liveness/aws-liveness.provider.ts`) |
-| `pnpm check:liveness`: tries the AWS set-up (IAM, role, region) with no browser | **Built**; run it yourself once the role exists |
-| The browser widget on the capture page (the challenge itself) | **Not built yet** (next step; see "What is missing") |
-
-Until the widget exists, setting `LIVENESS_PROVIDER=aws` would create sessions nobody can complete, so leave it `none` in production.
+| `pnpm check:liveness`: tries the AWS set-up (IAM, role, region) with no browser | **Built**, and passed against real AWS |
+| Capture page: a face check step in place of the selfie, with "send a selfie instead" as a fallback | **Built and tested** in jsdom |
+| The face check page (`/verify/liveness`) running the AWS widget | **Built**; the widget bundle builds in the tests, but it has **not yet run on a real camera**. Test it as below before enabling it for real people. |
 
 ## How it works
 
@@ -77,6 +76,27 @@ Face Liveness is available in Europe only in **Ireland (`eu-west-1`)**, not Fran
    ```
    Expected: "created a liveness session", "issued browser credentials" and "read the session back: incomplete". A failure names the missing permission; the usual causes are a wrong account id in the trust policy, or the server user lacking `sts:AssumeRole` on the role.
 
-## What is missing: the browser widget
+## The face check in the capture flow
 
-AWS only offers the challenge as a widget (`FaceLivenessDetector`, part of Amplify UI, a React component) that streams the camera to Rekognition. The hosted page is plain JavaScript with a strict content security policy, so the widget has to be added as a separate bundle (React and the Amplify packages built into one script served from this origin) and the page's policy has to allow, for that step only, connections to `rekognition.eu-west-1.amazonaws.com` and `wss://streaming-rekognition.eu-west-1.amazonaws.com`, plus the WebAssembly and worker features the widget's face detector needs. It also needs testing on real phones and browsers, which cannot be done from the automated tests. This is the next piece of work.
+- With `LIVENESS_PROVIDER=aws`, the capture page asks for the ID photos and then a **face check** instead of a selfie. "Start the face check" opens `/verify/liveness`, which runs the AWS widget and returns to the capture page when done. The token stays in the tab's `sessionStorage`; it never appears in a URL.
+- **Fallback:** "Cannot do the face check? Send a selfie instead" switches to the plain selfie upload (old browser, no camera permission, a widget error). Such a case cannot be approved automatically, because there is no liveness result, but it can be reviewed.
+- **Server rules:** submitting needs the ID front and either a selfie or a started face check. The face match uses the image captured during the challenge; with neither image the case reports `SELFIE_MISSING` and goes to review.
+- **Separate page, separate policy.** Only `/verify/liveness` is allowed WebAssembly (`'wasm-unsafe-eval'`, for the face detector), the camera stream (`blob:`, `mediastream:`), the detector's model from `https://cdn.liveness.rekognition.amazonaws.com`, and the WebSocket to `streaming-rekognition.<region>.amazonaws.com`. Still no inline script or style, no `eval`, no other origin. The capture page keeps its strict policy.
+- **The widget bundle** (`liveness-widget/`, React and the AWS Amplify liveness component) is built by `pnpm build` into `liveness-dist/` and served at `/verify/liveness-widget.js` and `.css`. If it is not built, the face check page says it cannot start and offers the selfie. Its Albanian and Serbian texts cover the main instructions and were written by the developer: have them reviewed.
+
+## Testing it on a real camera
+
+The automated tests cannot open a camera. Do this once with your own face before enabling it for anyone else.
+
+**On your laptop (simplest).** Browsers allow the camera on `localhost`:
+
+```sh
+pnpm build                       # builds the widget too
+LIVENESS_PROVIDER=aws STORAGE_DRIVER=local STORAGE_KEY_PROVIDER=env FACE_PROVIDER=none PUBLIC_BASE_URL=http://localhost:4100 pnpm start:dev
+```
+
+(`LIVENESS_REGION`, `LIVENESS_BROWSER_ROLE_ARN` and the `LIVENESS_*` keys come from your `.env`. This **does** stream your face to AWS in Ireland for the check.) Create a session, open its `hostedUrl` in Chrome or Safari on the laptop, upload any ID photos, then do the face check. After submitting, `GET /v1/sessions/<id>` should show `liveness.status: "live"` with a confidence, and `face.source: "liveness"` once face matching is on.
+
+**On a phone.** Phones only allow the camera on `https` pages, so `http://192.168…` will not work. A free temporary HTTPS address for your laptop: install Cloudflare's tunnel (`brew install cloudflared`), run `cloudflared tunnel --url http://localhost:4100`, and start the service with `PUBLIC_BASE_URL` set to the `https://….trycloudflare.com` address it prints and `TRUST_PROXY=1`. Use it only with your own data, and stop the tunnel afterwards.
+
+**What to report back** if it fails: the screen you reached, and anything red in the browser's developer console that mentions "Content Security Policy" or "Refused to" (it names a blocked address or feature, no personal data). That is the most likely kind of problem on a first run.

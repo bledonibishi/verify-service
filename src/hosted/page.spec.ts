@@ -4,7 +4,7 @@
  * uploads, retries, errors, languages), not how it looks.
  */
 import { JSDOM } from 'jsdom';
-import { VERIFY_HTML, VERIFY_JS } from './page';
+import { LIVENESS_HTML, LIVENESS_JS, VERIFY_HTML, VERIFY_JS } from './page';
 
 type Call = { method: string; url: string; body?: unknown };
 type Reply = { status: number; json?: unknown } | Error;
@@ -31,6 +31,8 @@ interface Options {
   blobSize?: number;
   language?: string;
   storedToken?: string;
+  /** Extra sessionStorage entries before the page runs. */
+  storage?: Record<string, string>;
 }
 
 function boot(o: Options = {}) {
@@ -68,6 +70,7 @@ function boot(o: Options = {}) {
   };
   if (o.language) Object.defineProperty(w.navigator, 'languages', { value: [o.language], configurable: true });
   if (o.storedToken) w.sessionStorage.setItem('verify-token', o.storedToken);
+  for (const [k, v] of Object.entries(o.storage ?? {})) w.sessionStorage.setItem(k, v);
   w.eval(VERIFY_JS);
   return { dom, w, calls, canvas, doc: w.document as Document };
 }
@@ -454,5 +457,199 @@ describe('hosted page', () => {
       expect(h1(env.doc)).toBe('Almost done'); // not a dead-link screen
       expect(button(env.doc, 'Submit for verification')!.disabled).toBe(false);
     });
+  });
+});
+
+
+describe('hosted page with a liveness provider', () => {
+  const LIVE = { ...PLAIN, liveness: true, livenessStarted: false, steps: [
+    { kind: 'ID_FRONT', required: true }, { kind: 'ID_BACK', required: false }, { kind: 'SELFIE', required: false },
+  ] };
+
+  async function throughDocuments(env: ReturnType<typeof boot>) {
+    await start(env);
+    pick(env); await use(env); // ID front
+    pick(env); await use(env); // ID back
+  }
+
+  it('asks for a face check instead of a selfie, as a link to the face check page', async () => {
+    const env = boot({ session: ok(LIVE) });
+    await flush();
+    expect(text(env.doc)).toContain('face check');
+    await throughDocuments(env);
+    expect(h1(env.doc)).toBe('Face check');
+    expect(env.doc.querySelectorAll('input[type=file]')).toHaveLength(0); // no photo upload on this step
+    const link = env.doc.querySelector('a.btn.primary') as HTMLAnchorElement;
+    expect(link.textContent).toBe('Start the face check');
+    expect(link.getAttribute('href')).toBe('/verify/liveness?lang=en');
+    expect(link.getAttribute('href')).not.toContain(TOKEN); // the token never goes into a URL
+  });
+
+  it('lets a person who cannot do the face check send a selfie instead, and remembers the choice', async () => {
+    const env = boot({ session: ok(LIVE) });
+    await throughDocuments(env);
+    button(env.doc, 'Send a selfie instead')!.click();
+    await flush();
+    expect(h1(env.doc)).toBe('A selfie');
+    expect(env.doc.querySelector('input[type=file]')!.getAttribute('capture')).toBe('user');
+    expect(env.w.sessionStorage.getItem('verify-selfie-instead')).toBe(TOKEN);
+    pick(env); await use(env);
+    expect(h1(env.doc)).toBe('Almost done');
+    expect(button(env.doc, 'Submit for verification')!.disabled).toBe(false);
+  });
+
+  it('back from a completed face check, continues to the review with the check marked done', async () => {
+    const env = boot({
+      url: 'http://verify.test/verify?lang=en',
+      storedToken: TOKEN,
+      storage: { 'verify-liveness-done': TOKEN, 'verify-resume': TOKEN },
+      session: ok({ ...LIVE, livenessStarted: true, uploaded: ['ID_FRONT', 'ID_BACK'] }),
+    });
+    await flush();
+    expect(h1(env.doc)).toBe('Almost done');
+    expect(text(env.doc)).toContain('Face check');
+    expect(text(env.doc)).toContain('✓');
+    expect(button(env.doc, 'Submit for verification')!.disabled).toBe(false);
+    expect(env.w.sessionStorage.getItem('verify-resume')).toBeNull();
+  });
+
+  it('does not count a face check as done unless the service has one on record, for this link', async () => {
+    const noRecord = boot({ storedToken: TOKEN, url: 'http://verify.test/verify', storage: { 'verify-liveness-done': TOKEN, 'verify-resume': TOKEN }, session: ok({ ...LIVE, uploaded: ['ID_FRONT', 'ID_BACK'] }) });
+    await flush();
+    expect(h1(noRecord.doc)).toBe('Face check');
+    const otherLink = boot({ storedToken: TOKEN, url: 'http://verify.test/verify', storage: { 'verify-liveness-done': 'some-other-token-0123456789', 'verify-resume': TOKEN }, session: ok({ ...LIVE, livenessStarted: true, uploaded: ['ID_FRONT', 'ID_BACK'] }) });
+    await flush();
+    expect(h1(otherLink.doc)).toBe('Face check');
+  });
+
+  it('without a liveness provider, nothing changes: a plain selfie step', async () => {
+    const env = boot();
+    await throughDocuments(env);
+    expect(h1(env.doc)).toBe('A selfie');
+    expect(env.doc.querySelector('a.btn')).toBeNull();
+  });
+
+  it('after submitting, a reload thanks the person instead of calling the link dead', async () => {
+    const env = boot({ url: 'http://verify.test/verify', storage: { 'verify-done': '1' } });
+    await flush();
+    expect(h1(env.doc)).toBe('Thank you');
+    expect(env.calls).toHaveLength(0);
+  });
+});
+
+/**
+ * The face check page's loader, with a stand-in for the AWS widget: it records what the page gives
+ * it and lets the test play the widget's outcome. No camera, no AWS.
+ */
+function bootLiveness(o: { token?: string | null; widget?: boolean; replies?: Reply[]; lang?: string } = {}) {
+  const { VirtualConsole } = require('jsdom');
+  const navigations: string[] = [];
+  const vc = new VirtualConsole();
+  vc.on('jsdomError', (e: Error) => { if (/navigation/i.test(e.message)) navigations.push('navigated'); });
+  const dom = new JSDOM(LIVENESS_HTML, { url: `http://verify.test/verify/liveness?lang=${o.lang ?? 'en'}`, runScripts: 'outside-only', virtualConsole: vc });
+  const w = dom.window as any;
+  const calls: Call[] = [];
+  const replies = [...(o.replies ?? [ok({ provider: 'aws', sessionId: 'aws-session-1', region: 'eu-west-1', credentials: { accessKeyId: 'ASIA', secretAccessKey: 'S3CR3T', sessionToken: 'T0K3N' } })])];
+  w.fetch = async (url: string, init: { method?: string } = {}) => {
+    calls.push({ method: init.method ?? 'GET', url });
+    const r = replies.length > 1 ? replies.shift()! : replies[0];
+    if (r instanceof Error) throw r;
+    return { status: r.status, json: async () => r.json ?? {} };
+  };
+  if (o.token !== null) w.sessionStorage.setItem('verify-token', o.token ?? TOKEN);
+  const mounts: any[] = [];
+  let unmounted = 0;
+  if (o.widget !== false) w.VerifyLiveness = { mount: (_el: unknown, opts: any) => { mounts.push(opts); return () => { unmounted++; }; } };
+  w.eval(LIVENESS_JS);
+  return { w, doc: w.document as Document, calls, mounts, navigations, unmounted: () => unmounted };
+}
+
+describe('face check page', () => {
+  it('starts a challenge for the stored link and hands the widget what it needs, from memory only', async () => {
+    const env = bootLiveness();
+    await flush();
+    expect(env.calls).toEqual([{ method: 'POST', url: `/v1/upload/${TOKEN}/liveness` }]);
+    expect(env.mounts).toHaveLength(1);
+    expect(env.mounts[0]).toMatchObject({ sessionId: 'aws-session-1', region: 'eu-west-1', lang: 'en', credentials: { secretAccessKey: 'S3CR3T' } });
+    // the credentials are never written into the page or the tab's storage
+    expect(env.doc.documentElement.outerHTML).not.toContain('S3CR3T');
+    const storage = JSON.stringify(Object.keys(env.w.sessionStorage).map((k) => env.w.sessionStorage.getItem(k)));
+    expect(storage).not.toContain('S3CR3T');
+    expect(storage).not.toContain('T0K3N');
+  });
+
+  it('on success, marks the check done for this link and goes back to the capture page', async () => {
+    const env = bootLiveness();
+    await flush();
+    env.mounts[0].onComplete();
+    expect(env.w.sessionStorage.getItem('verify-liveness-done')).toBe(TOKEN);
+    expect(env.w.sessionStorage.getItem('verify-resume')).toBe(TOKEN);
+    expect(env.navigations.length).toBeGreaterThan(0);
+    expect(env.unmounted()).toBe(1);
+  });
+
+  it('on cancel, goes back without marking anything done', async () => {
+    const env = bootLiveness();
+    await flush();
+    env.mounts[0].onCancel();
+    expect(env.w.sessionStorage.getItem('verify-liveness-done')).toBeNull();
+    expect(env.navigations.length).toBeGreaterThan(0);
+  });
+
+  it('on a widget error, offers a new try (a fresh challenge) or a selfie instead', async () => {
+    const env = bootLiveness();
+    await flush();
+    env.mounts[0].onError('CAMERA_ACCESS_ERROR');
+    expect(h1(env.doc)).toBe('Face check');
+    expect(text(env.doc)).toContain('did not work');
+    button(env.doc, 'Try again')!.click();
+    await flush();
+    expect(env.calls).toHaveLength(2); // a new challenge, not the old one again
+    expect(env.mounts).toHaveLength(2);
+    env.mounts[1].onError('TIMEOUT');
+    button(env.doc, 'Send a selfie instead')!.click();
+    expect(env.w.sessionStorage.getItem('verify-selfie-instead')).toBe(TOKEN);
+    expect(env.navigations.length).toBeGreaterThan(0);
+  });
+
+  it('explains instead of breaking when the service has no face check, or the link is closed or unknown', async () => {
+    const off = bootLiveness({ replies: [{ status: 501, json: { message: 'Liveness is not available' } }] });
+    await flush();
+    expect(text(off.doc)).toContain('could not start');
+    expect(button(off.doc, 'Send a selfie instead')).toBeDefined();
+    const closed = bootLiveness({ replies: [{ status: 410, json: { code: 'session_closed' } }] });
+    await flush();
+    expect(h1(closed.doc)).toBe('This link cannot be used');
+    const unknown = bootLiveness({ replies: [{ status: 404, json: {} }] });
+    await flush();
+    expect(h1(unknown.doc)).toBe('Link not found');
+    const offline = bootLiveness({ replies: [new Error('offline')] });
+    await flush();
+    expect(text(offline.doc)).toContain('could not start');
+  });
+
+  it('without a stored link it starts nothing', async () => {
+    const env = bootLiveness({ token: null });
+    await flush();
+    expect(h1(env.doc)).toBe('Link not found');
+    expect(env.calls).toHaveLength(0);
+  });
+
+  it('when the widget is not installed, offers the selfie without calling the service', async () => {
+    const env = bootLiveness({ widget: false });
+    await flush();
+    expect(env.calls).toHaveLength(0);
+    expect(text(env.doc)).toContain('could not start');
+    expect(button(env.doc, 'Send a selfie instead')).toBeDefined();
+  });
+
+  it('speaks Albanian and Serbian too', async () => {
+    const sq = bootLiveness({ lang: 'sq', replies: [{ status: 501, json: {} }] });
+    await flush();
+    expect(h1(sq.doc)).toBe('Kontrolli i fytyrës');
+    expect(sq.mounts).toHaveLength(0);
+    const sr = bootLiveness({ lang: 'sr' });
+    await flush();
+    expect(sr.mounts[0].lang).toBe('sr');
   });
 });
