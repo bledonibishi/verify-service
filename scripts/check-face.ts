@@ -10,7 +10,7 @@
  * Prints only the outcome and the similarity score (0-100), never paths' contents or anything read
  * from the images, so the output is safe to paste into a chat or issue.
  */
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync, statSync } from 'fs';
 import { RekognitionProvider } from '../src/face/rekognition.provider';
 import { FaceUnavailableError } from '../src/face/face-provider';
 import { faceOutcome } from '../src/verification/decision';
@@ -44,7 +44,19 @@ async function main() {
       process.exit(2);
     }
   }
-  const threshold = Number(flags.find((f) => f.startsWith('--threshold='))?.split('=')[1] ?? 90);
+  // Rekognition takes at most 5 MB per image; say so before reading a huge file into memory
+  for (const f of [idPath, selfiePath]) {
+    if (statSync(f).size > 5 * 1024 * 1024) {
+      console.log(`Not run: ${f} is larger than 5 MB (Rekognition's limit)`);
+      process.exit(2);
+    }
+  }
+  const thresholdText = flags.find((f) => f.startsWith('--threshold='))?.split('=')[1];
+  const threshold = thresholdText === undefined ? 90 : /^\d+(\.\d+)?$/.test(thresholdText) ? Number(thresholdText) : NaN;
+  if (!(threshold >= 0 && threshold <= 100)) {
+    console.log('Not run: --threshold must be a number from 0 to 100');
+    process.exit(2);
+  }
   const provider = RekognitionProvider.forRegion(region);
   try {
     const result = await provider.compare(readFileSync(idPath), readFileSync(selfiePath));
