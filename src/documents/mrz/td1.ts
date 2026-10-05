@@ -33,7 +33,8 @@ export type MrzIssueCode =
   | 'OPTIONAL_DATA_PRESENT'
   | 'INVALID_NAME'
   | 'GIVEN_NAMES_MISSING'
-  | 'OCR_REPAIRED';
+  | 'OCR_REPAIRED'
+  | 'MRZ_SHAPE_INVALID';
 
 export interface MrzIssue {
   code: MrzIssueCode;
