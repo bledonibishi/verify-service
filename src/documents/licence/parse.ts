@@ -49,7 +49,9 @@ const digits = (s: string): { value: string; repaired: boolean } => {
 
 // Anchored: a date is a whole token, never a slice of a longer run of digits
 const D = '0-9OoIlLSBZ';
-const DATE = new RegExp(`(?<![${D}])([${D}]{1,2})\\s?[./-]\\s?([${D}]{1,2})\\s?[./-]\\s?([${D}]{4})(?![${D}])`);
+// No letter or digit may touch the date on either side: `12.03.2022GARBAGE` and `X12.03.2022` are OCR damage,
+// not dates (the date alphabet above only covers look-alikes of digits, not every letter)
+const DATE = new RegExp(`(?<![${D}A-Za-z0-9])([${D}]{1,2})\\s?[./-]\\s?([${D}]{1,2})\\s?[./-]\\s?([${D}]{4})(?![${D}A-Za-z0-9])`);
 
 function parseDate(text: string): { iso: string; repaired: boolean } | null {
   const m = text.match(DATE);

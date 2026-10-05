@@ -429,3 +429,104 @@ describe('storage configuration', () => {
     expect(() => build({ ...base, ...extra })).toThrow(message);
   });
 });
+
+/**
+ * Two (or more) KMS keys in one stand-in service. Like the real one, a data key wrapped by one key is
+ * refused with IncorrectKeyException when another key is named, and each key's wrapped blobs carry
+ * their key (the real ciphertext blob does too).
+ */
+function fakeKmsKeys(ids: string[]) {
+  const masters = new Map(ids.map((id) => [id, randomBytes(32)]));
+  const aadOf = (c: Record<string, string> | undefined) => Buffer.from(JSON.stringify(Object.entries(c ?? {}).sort()));
+  const asked: string[] = [];
+  const err = (name: string) => Object.assign(new Error(name), { name });
+  const client = {
+    send: async (cmd: unknown) => {
+      if (cmd instanceof GenerateDataKeyCommand) {
+        const id = cmd.input.KeyId as string;
+        const master = masters.get(id);
+        if (!master) throw err('NotFoundException');
+        const dek = randomBytes(32);
+        const iv = randomBytes(12);
+        const c = createCipheriv('aes-256-gcm', master, iv);
+        c.setAAD(aadOf(cmd.input.EncryptionContext as Record<string, string>));
+        const body = Buffer.concat([c.update(dek), c.final(), c.getAuthTag()]);
+        const tag = Buffer.from(id);
+        return { Plaintext: new Uint8Array(dek), CiphertextBlob: new Uint8Array(Buffer.concat([Buffer.from([tag.length]), tag, iv, body])) };
+      }
+      if (cmd instanceof DecryptCommand) {
+        const id = cmd.input.KeyId as string;
+        asked.push(id);
+        const blob = Buffer.from(cmd.input.CiphertextBlob as Uint8Array);
+        const wrappedBy = blob.subarray(1, 1 + blob[0]).toString();
+        if (wrappedBy !== id) throw err('IncorrectKeyException');
+        const master = masters.get(id);
+        if (!master) throw err('NotFoundException');
+        try {
+          const rest = blob.subarray(1 + blob[0]);
+          const d = createDecipheriv('aes-256-gcm', master, rest.subarray(0, 12));
+          d.setAAD(aadOf(cmd.input.EncryptionContext as Record<string, string>));
+          d.setAuthTag(rest.subarray(rest.length - 16));
+          return { Plaintext: new Uint8Array(Buffer.concat([d.update(rest.subarray(12, rest.length - 16)), d.final()])) };
+        } catch {
+          throw err('InvalidCiphertextException');
+        }
+      }
+      throw new Error('unexpected command');
+    },
+  };
+  return { client: client as never, asked };
+}
+
+describe('changing the KMS key', () => {
+  const ctxOf = () => ctx();
+  const config = (values: Record<string, string>) => ({ get: (k: string) => values[k] }) as unknown as ConfigService;
+
+  it('data written under the old key is still readable when the old key is listed as previous', async () => {
+    const kms = fakeKmsKeys(['key-old', 'key-new']);
+    const sealedOld = await new KmsKeyProvider(kms.client, { keyId: 'key-old' }).seal(secret, ctxOf());
+    const now = new KmsKeyProvider(kms.client, { keyId: 'key-new', previousKeyIds: ['key-old'] });
+    expect((await now.open(sealedOld, ctxOf())).equals(secret)).toBe(true);
+    expect(kms.asked).toEqual(['key-new', 'key-old']); // the current key is tried first
+    // readable, but not "current": storage:reencrypt must still move it to the new key
+    expect(await now.isCurrent(sealedOld, ctxOf())).toBe(false);
+    expect(await now.isCurrent(await now.seal(secret, ctxOf()), ctxOf())).toBe(true);
+  });
+
+  it('new data is always sealed with the current key only', async () => {
+    const kms = fakeKmsKeys(['key-old', 'key-new']);
+    const now = new KmsKeyProvider(kms.client, { keyId: 'key-new', previousKeyIds: ['key-old'] });
+    const sealed = await now.seal(secret, ctxOf());
+    expect((await new KmsKeyProvider(kms.client, { keyId: 'key-new' }).open(sealed, ctxOf())).equals(secret)).toBe(true);
+    await expect(new KmsKeyProvider(kms.client, { keyId: 'key-old' }).open(sealed, ctxOf())).rejects.toBeInstanceOf(KeyUnavailableError);
+  });
+
+  it('without the old key listed, objects are "unavailable with a hint", never reported as corrupt', async () => {
+    const kms = fakeKmsKeys(['key-old', 'key-new']);
+    const sealedOld = await new KmsKeyProvider(kms.client, { keyId: 'key-old' }).seal(secret, ctxOf());
+    const err = await new KmsKeyProvider(kms.client, { keyId: 'key-new' }).open(sealedOld, ctxOf()).catch((e) => e);
+    expect(err).toBeInstanceOf(KeyUnavailableError);
+    expect(err).not.toBeInstanceOf(StoredObjectCorruptError);
+    expect(err.message).toContain('KMS_PREVIOUS_KEY_IDS');
+  });
+
+  it('real damage is still reported as corrupt, with or without previous keys', async () => {
+    const kms = fakeKmsKeys(['key-old', 'key-new']);
+    const p = new KmsKeyProvider(kms.client, { keyId: 'key-new', previousKeyIds: ['key-old'] });
+    const sealed = await p.seal(secret, ctxOf());
+    const bad = Buffer.from(sealed);
+    bad[bad.length - 1] ^= 1; // flips a bit in the encrypted body
+    await expect(p.open(bad, ctxOf())).rejects.toBeInstanceOf(StoredObjectCorruptError);
+    // and a context for a different session still fails, under any key
+    await expect(p.open(sealed, ctx('tenant-1/other-session/object-1'))).rejects.toBeInstanceOf(StoredObjectCorruptError);
+  });
+
+  it('is read from KMS_PREVIOUS_KEY_IDS, separated by commas or spaces', () => {
+    const svc = new StorageService(
+      config({ STORAGE_KEY_PROVIDER: 'kms', KMS_KEY_ID: 'alias/new', KMS_REGION: 'eu-central-1', KMS_PREVIOUS_KEY_IDS: 'arn:aws:kms:eu-central-1:1:key/a, alias/b  alias/c' }),
+      new LocalBlobStore(mkdtempSync(join(tmpdir(), 'prev-'))),
+    );
+    const keys = (svc as unknown as { keys: { opts: { previousKeyIds?: string[] } } }).keys;
+    expect(keys.opts.previousKeyIds).toEqual(['arn:aws:kms:eu-central-1:1:key/a', 'alias/b', 'alias/c']);
+  });
+});

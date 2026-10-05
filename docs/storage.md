@@ -14,7 +14,7 @@ Bucket contents are ciphertext only. S3 server-side encryption (`S3_SSE=AES256`,
 ### Bucket checklist (eu-central-1, Frankfurt)
 
 - **Block all public access**: on.
-- **Versioning: off.** With versioning on, deleting an object only adds a marker and the old bytes survive, which defeats erasure ([retention](retention.md)). The IAM policy below deliberately cannot read or change this setting, so check it in the console.
+- **Versioning: off (recommended).** With versioning on, a plain delete only adds a marker and the old bytes survive, which defeats erasure ([retention](retention.md)). Before every erasure the service asks the bucket (cached for 5 minutes, needs `s3:GetBucketVersioning`): if versioning is on or suspended it deletes **every version and marker** of the object (needs `s3:ListBucketVersions` and `s3:DeleteObjectVersion`), and if it cannot find out it **fails the erasure** (the record is kept and retried) instead of claiming a deletion that may not have happened. Turn versioning off anyway: old versions of other objects are not your concern, but the bucket then costs less and erasure is one request.
 - Object Ownership: ACLs disabled. Default encryption: SSE-S3.
 - Optional: a lifecycle rule to abort incomplete multipart uploads after one day, and a bucket policy denying requests where `aws:SecureTransport` is false.
 
@@ -28,11 +28,15 @@ A dedicated user (or, in production, an instance role), separate from the face-m
   "Statement": [
     { "Effect": "Allow", "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
       "Resource": "arn:aws:s3:::<full-bucket-name>/*" },
-    { "Effect": "Allow", "Action": "s3:ListBucket",
+    { "Effect": "Allow", "Action": ["s3:ListBucket", "s3:GetBucketVersioning"],
       "Resource": "arn:aws:s3:::<full-bucket-name>" }
   ]
 }
 ```
+
+If you ever turn versioning on, also allow `s3:ListBucketVersions` on the bucket and `s3:DeleteObjectVersion` on `arn:aws:s3:::<full-bucket-name>/*`.
+
+**`s3:GetBucketVersioning` is required** (unless you set `S3_VERSIONING_CHECK=off`, see below): without it the service cannot tell whether a delete really removes the data, so erasures fail rather than guess.
 
 **`s3:ListBucket` is required.** Without it S3 answers `403 AccessDenied` instead of `404` when an object is absent, so every erased document would look like a storage failure (a 500) instead of a deleted one (a 410), and `storage:check` fails at "confirm it is gone". It does not let the service list your documents. With `S3_KEY_PREFIX`, narrow the object resource to `.../<prefix>/*` and add `"Condition": { "StringLike": { "s3:prefix": "<prefix>/*" } }` to the `ListBucket` statement. With `aws:kms`, also allow `kms:GenerateDataKey` and `kms:Decrypt` on that key.
 
@@ -47,6 +51,7 @@ A dedicated user (or, in production, an instance role), separate from the face-m
 | `S3_SSE`, `S3_KMS_KEY_ID` | Server-side encryption mode. |
 | `S3_KEY_PREFIX` | Optional folder inside the bucket: letters, digits, `.`, `_`, `-` and single slashes; `/` alone means none. |
 | `S3_ENDPOINT`, `S3_FORCE_PATH_STYLE=true` | For S3-compatible servers. |
+| `S3_VERSIONING_CHECK=off` | Skip the versioning question before an erasure. Only for operators who have confirmed versioning is off and do not grant `s3:GetBucketVersioning`. Default `auto`. |
 
 Real values go in `.env` only, never in `.env.example`.
 

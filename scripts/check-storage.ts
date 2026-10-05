@@ -62,9 +62,9 @@ async function main() {
   ];
   if (results.every(Boolean)) {
     console.log('All checks passed.');
-    if (driver === 's3') console.log('Also confirm in the AWS console that bucket versioning is OFF; otherwise deleted objects survive as old versions.');
+    if (driver === 's3') console.log('Bucket versioning was checked as part of the delete step (needs s3:GetBucketVersioning). Still confirm in the AWS console that versioning is OFF.');
   } else {
-    console.log('Some checks failed. 403 usually means the IAM policy or bucket name is wrong: S3_BUCKET must be the full bucket name, and the policy needs s3:ListBucket on the bucket as well as Put/Get/DeleteObject on its objects (without it, a missing object looks like AccessDenied). With STORAGE_KEY_PROVIDER=kms, the same user also needs kms:GenerateDataKey and kms:Decrypt on the key.');
+    console.log('Some checks failed. 403 usually means the IAM policy or bucket name is wrong: S3_BUCKET must be the full bucket name, and the policy needs s3:ListBucket and s3:GetBucketVersioning on the bucket as well as Put/Get/DeleteObject on its objects (without ListBucket, a missing object looks like AccessDenied; without GetBucketVersioning, deletes are refused as unverifiable). With STORAGE_KEY_PROVIDER=kms, the same user also needs kms:GenerateDataKey and kms:Decrypt on the key.');
     process.exit(1);
   }
 }

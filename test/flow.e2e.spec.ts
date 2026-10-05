@@ -2154,10 +2154,13 @@ describe('verification flow (e2e)', () => {
           const csp = (await request(http()).get('/verify').expect(200)).headers['content-security-policy'];
           expect(csp).toContain('frame-ancestors https://app.example.com');
           expect(csp).not.toMatch(/evil|javascript|\*/);
+          // An old browser that ignores frame-ancestors is still kept from being framed by others
+          expect((await request(http()).get('/verify').expect(200)).headers['x-frame-options']).toBe('SAMEORIGIN');
           process.env.HOSTED_FRAME_ANCESTORS = '* https://x.test;script-src';
           const closed = await request(http()).get('/verify').expect(200);
           expect(closed.headers['content-security-policy']).toContain("frame-ancestors 'none'");
           expect(closed.headers['content-security-policy']).not.toContain('x.test');
+          expect(closed.headers['x-frame-options']).toBe('DENY');
         } finally {
           if (original === undefined) delete process.env.HOSTED_FRAME_ANCESTORS;
           else process.env.HOSTED_FRAME_ANCESTORS = original;

@@ -1,13 +1,15 @@
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetBucketVersioningCommand, GetObjectCommand, ListObjectVersionsCommand, PutObjectCommand } from '@aws-sdk/client-s3';
 import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'crypto';
 import { StoredObjectMissingError } from './blob-store';
-import { S3BlobStore } from './s3-blob-store';
+import { ErasureNotVerifiableError, S3BlobStore } from './s3-blob-store';
 import { StorageService } from './storage.service';
 
 /** An in-memory stand-in for S3: no network, no credentials. */
-function fakeS3() {
+function fakeS3(opts: { versioning?: 'Enabled' | 'Suspended'; versioningError?: string; pageSize?: number } = {}) {
   const objects = new Map<string, Buffer>();
+  // For a versioned bucket: every version and delete marker, by key
+  const versions: { key: string; id: string; marker: boolean }[] = [];
   const sent: { cmd: string; input: Record<string, unknown> }[] = [];
   const client = {
     send: async (command: unknown) => {
@@ -24,15 +26,42 @@ function fakeS3() {
         if (!body) throw Object.assign(new Error('The specified key does not exist.'), { name: 'NoSuchKey', $metadata: { httpStatusCode: 404 } });
         return { Body: { transformToByteArray: async () => new Uint8Array(body) } };
       }
+      if (command instanceof GetBucketVersioningCommand) {
+        sent.push({ cmd: 'getVersioning', input: c.input });
+        if (opts.versioningError) throw Object.assign(new Error(opts.versioningError), { name: opts.versioningError });
+        return opts.versioning ? { Status: opts.versioning } : {};
+      }
+      if (command instanceof ListObjectVersionsCommand) {
+        sent.push({ cmd: 'listVersions', input: c.input });
+        const prefix = c.input.Prefix as string;
+        const all = versions.filter((v) => v.key.startsWith(prefix));
+        const start = c.input.VersionIdMarker ? all.findIndex((v) => v.id === c.input.VersionIdMarker) + 1 : 0;
+        const size = opts.pageSize ?? 1000;
+        const page = all.slice(start, start + size);
+        const truncated = start + size < all.length;
+        return {
+          Versions: page.filter((v) => !v.marker).map((v) => ({ Key: v.key, VersionId: v.id })),
+          DeleteMarkers: page.filter((v) => v.marker).map((v) => ({ Key: v.key, VersionId: v.id })),
+          IsTruncated: truncated,
+          NextKeyMarker: truncated ? page[page.length - 1].key : undefined,
+          NextVersionIdMarker: truncated ? page[page.length - 1].id : undefined,
+        };
+      }
       if (command instanceof DeleteObjectCommand) {
         sent.push({ cmd: 'delete', input: c.input });
+        if (c.input.VersionId) {
+          const i = versions.findIndex((v) => v.key === c.input.Key && v.id === c.input.VersionId);
+          if (i >= 0) versions.splice(i, 1);
+          return {};
+        }
         objects.delete(bucketKey); // like S3: success even when the key is absent
+        if (opts.versioning) versions.push({ key: c.input.Key as string, id: `m${versions.length}`, marker: true }); // only a marker
         return {};
       }
       throw new Error('unexpected command');
     },
   };
-  return { client: client as never, objects, sent };
+  return { client: client as never, objects, sent, versions };
 }
 
 const config = (values: Record<string, string>) => ({ get: (k: string) => values[k] }) as unknown as ConfigService;
@@ -163,5 +192,84 @@ describe('StorageService over S3', () => {
     it('keeps local disk as the default', () => {
       expect(() => new StorageService(config({ STORAGE_ENCRYPTION_KEY: KEY }))).not.toThrow();
     });
+  });
+});
+
+describe('S3BlobStore erasure and bucket versioning', () => {
+  const put = async (store: S3BlobStore, versions: ReturnType<typeof fakeS3>['versions'], key: string, n: number) => {
+    for (let i = 0; i < n; i++) versions.push({ key: `b/${key}`.replace('b/', ''), id: `v${versions.length}`, marker: false });
+    await store.put(key, Buffer.from('x'));
+  };
+
+  it('deletes with one request when the bucket is not versioned, and asks only once in a while', async () => {
+    const s3 = fakeS3();
+    const store = new S3BlobStore(s3.client, { bucket: 'b' });
+    await store.put('a/1', Buffer.from('x'));
+    await store.put('a/2', Buffer.from('x'));
+    await store.delete('a/1');
+    await store.delete('a/2');
+    expect(s3.sent.filter((c) => c.cmd === 'getVersioning')).toHaveLength(1); // cached
+    expect(s3.sent.filter((c) => c.cmd === 'delete')).toHaveLength(2);
+    expect(s3.sent.some((c) => c.cmd === 'listVersions')).toBe(false);
+  });
+
+  it.each(['Enabled', 'Suspended'] as const)('removes every version and marker of the object when versioning is %s', async (versioning) => {
+    const s3 = fakeS3({ versioning });
+    const store = new S3BlobStore(s3.client, { bucket: 'b', prefix: 'p' });
+    await put(store, s3.versions, 'p/doc', 3);
+    s3.versions.push({ key: 'p/doc', id: 'marker-1', marker: true });
+    s3.versions.push({ key: 'p/doc2', id: 'other', marker: false }); // a different object that shares the start of the name
+    await store.delete('doc');
+    expect(s3.versions.map((v) => v.key)).toEqual(['p/doc2']); // only the other object is left
+    expect(s3.sent.filter((c) => c.cmd === 'delete').every((c) => c.input.VersionId)).toBe(true); // by version id, never a bare delete
+  });
+
+  it('follows pages of versions', async () => {
+    const s3 = fakeS3({ versioning: 'Enabled', pageSize: 2 });
+    const store = new S3BlobStore(s3.client, { bucket: 'b' });
+    await put(store, s3.versions, 'doc', 5);
+    await store.delete('doc');
+    expect(s3.versions.filter((v) => v.key === 'doc')).toHaveLength(0);
+  });
+
+  it('is idempotent for an object that is already gone', async () => {
+    const s3 = fakeS3({ versioning: 'Enabled' });
+    const store = new S3BlobStore(s3.client, { bucket: 'b' });
+    await expect(store.delete('never-existed')).resolves.toBeUndefined();
+  });
+
+  it('refuses to claim an erasure it cannot verify, and deletes nothing', async () => {
+    const s3 = fakeS3({ versioningError: 'AccessDenied' });
+    const store = new S3BlobStore(s3.client, { bucket: 'b' });
+    await store.put('doc', Buffer.from('x'));
+    const err = await store.delete('doc').catch((e) => e);
+    expect(err).toBeInstanceOf(ErasureNotVerifiableError);
+    expect(err.message).toContain('s3:GetBucketVersioning');
+    expect(s3.sent.some((c) => c.cmd === 'delete')).toBe(false);
+  });
+
+  it('treats a server without versioning support (not implemented) as unversioned', async () => {
+    const s3 = fakeS3({ versioningError: 'NotImplemented' });
+    const store = new S3BlobStore(s3.client, { bucket: 'b' });
+    await store.put('doc', Buffer.from('x'));
+    await store.delete('doc');
+    expect(s3.objects.size).toBe(0);
+  });
+
+  it('can be told not to ask (versioning known to be off, permission not granted)', async () => {
+    const s3 = fakeS3({ versioningError: 'AccessDenied' });
+    const store = new S3BlobStore(s3.client, { bucket: 'b', versioningCheck: 'off' });
+    await store.put('doc', Buffer.from('x'));
+    await store.delete('doc');
+    expect(s3.sent.some((c) => c.cmd === 'getVersioning')).toBe(false);
+    expect(s3.objects.size).toBe(0);
+  });
+
+  it('is configured from S3_VERSIONING_CHECK', () => {
+    const svc = (v: Record<string, string>) =>
+      new StorageService(config({ STORAGE_DRIVER: 's3', S3_BUCKET: 'b', S3_REGION: 'eu-central-1', STORAGE_ENCRYPTION_KEY: KEY, ...v }));
+    const optsOf = (s: StorageService) => ((s as unknown as { store: { opts: { versioningCheck: string } } }).store.opts.versioningCheck);
+    expect(optsOf(svc({}))).toBe('auto');
+    expect(optsOf(svc({ S3_VERSIONING_CHECK: 'off' }))).toBe('off');
   });
 });
