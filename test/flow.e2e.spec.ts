@@ -3492,6 +3492,30 @@ describe('verification flow (e2e)', () => {
       expect(await status(first.apiKey)).toBe(401);
     });
 
+    it('tenant:update changes or clears the webhook address and refuses bad ones', async () => {
+      const t = await mkTenant('hook');
+      const update = (args: string[]) =>
+        new Promise<{ code: number }>((resolve) => {
+          execFile('node', ['-r', 'ts-node/register', 'scripts/update-tenant.ts', ...args], { env: process.env, cwd: process.cwd(), timeout: 60_000 }, (error) =>
+            resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0 }),
+          );
+        });
+      const hookOf = async () => (await prisma.tenant.findUniqueOrThrow({ where: { id: t.id } })).webhookUrl;
+      expect((await update([t.id, '--webhook-url=http://localhost:3000/hook'])).code).toBe(0);
+      expect(await hookOf()).toBe('http://localhost:3000/hook');
+      expect((await update([t.id, '--webhook-url=https://pharmacy.example/webhooks/verify'])).code).toBe(0);
+      expect(await hookOf()).toBe('https://pharmacy.example/webhooks/verify');
+      for (const bad of ['--webhook-url=', '--webhook-url=not a url', '--webhook-url=ftp://x.example/a', '--webhook-url=https://user:pw@x.example/a', '--webhook-url=javascript:alert(1)']) {
+        expect((await update([t.id, bad])).code).toBe(1);
+      }
+      expect(await hookOf()).toBe('https://pharmacy.example/webhooks/verify'); // the bad ones changed nothing
+      expect((await update([t.id, '--webhook-url=none'])).code).toBe(0);
+      expect(await hookOf()).toBeNull();
+      // other settings still work together with it
+      expect((await update([t.id, '--doc-retention-days=10', '--webhook-url=http://localhost:3000/again'])).code).toBe(0);
+      expect(await prisma.tenant.findUniqueOrThrow({ where: { id: t.id } })).toMatchObject({ webhookUrl: 'http://localhost:3000/again', documentRetentionDays: 10 });
+    }, 120_000);
+
     it('the command prints a working key once, and fails clearly on bad input', async () => {
       const t = await mkTenant('cli');
       const ok = await run([t.id, '--grace-hours=1']);
