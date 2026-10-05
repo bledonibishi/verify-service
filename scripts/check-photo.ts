@@ -46,7 +46,12 @@ async function main() {
     // For each way of reading the photo: the length and shape of every line that could be an MRZ line
     const describe = (label: string, text: string) => {
       const lines = text.split(/\r?\n/).map(cleanMrzText).filter((l) => l.length >= 20);
-      console.log(`${label}: ${lines.length ? lines.map((l) => `${l.length}:${shape(l)}${/^[A-Z]{5,8}[0-9]{6,}/.test(l) ? ` [starts ${l.slice(0, 5)}]` : ''}`).join('  |  ') : '(no long lines)'}`);
+      // Only line 1 may show its first five characters (document type + RKS, the same on every
+      // card, which is what a misread shows up in). A line counts as line 1 only if it is shaped like
+      // it (letters, then 6-10 digits, then a run of fillers) AND has the R...K of RKS near its start;
+      // otherwise nothing is shown. At most one line per reading is opened up.
+      const line1 = lines.findIndex((l) => /^[A-Z]{5,8}[0-9]{6,10}<{6,}/.test(l) && /R.{0,2}K/.test(l.slice(0, 8)));
+      console.log(`${label}: ${lines.length ? lines.map((l, i) => `${l.length}:${shape(l)}${i === line1 ? ` [starts ${l.slice(0, 5)}]` : ''}`).join('  |  ') : '(no long lines)'}`);
     };
     describe('as uploaded', asUploaded.text);
     let n = 0;
