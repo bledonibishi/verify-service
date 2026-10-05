@@ -118,8 +118,12 @@ export function alignLine(raw: string, template: Slot[]): Alignment {
   while (i > 0 || j > 0) {
     const mv = move[i][j];
     if (mv === 'd') {
-      if (fit(raw[i - 1], template[j - 1]) > 0) edits++;
-      out.push(raw[i - 1]);
+      const f = fit(raw[i - 1], template[j - 1]);
+      if (f > 0) edits++;
+      const slot = template[j - 1];
+      // A fixed character of the layout (the I, and RKS) read as a look-alike is written as the
+      // real one. No check digit covers these positions, so this changes nothing that is verified.
+      out.push(slot.kind === 'lit' && f > 0 && f <= 0.4 ? slot.ch : raw[i - 1]);
       i--;
       j--;
     } else if (mv === 'x') {
@@ -208,4 +212,28 @@ export function approximateTd1Candidates(ocrText: string): ApproximateTd1[] {
 /** The closest-fitting candidate, or null. See `approximateTd1Candidates`. */
 export function extractApproximateTd1(ocrText: string): ApproximateTd1 | null {
   return approximateTd1Candidates(ocrText)[0] ?? null;
+}
+
+/**
+ * Writes the fixed characters of the layout (the I, and RKS twice) where OCR gave an accepted
+ * look-alike, on lines that already have the right length. Returns the same lines when nothing
+ * needed fixing. No check digit covers these positions.
+ */
+export function fixLayoutLiterals(lines: string[]): { lines: string[]; changed: boolean } {
+  let changed = false;
+  const out = lines.map((line, k) => {
+    if (k > 1 || line.length !== TEMPLATES[k].length) return line;
+    const chars = [...line];
+    TEMPLATES[k].forEach((slot, j) => {
+      if (slot.kind === 'lit') {
+        const f = fit(chars[j], slot);
+        if (f > 0 && f <= 0.4) {
+          chars[j] = slot.ch;
+          changed = true;
+        }
+      }
+    });
+    return chars.join('');
+  });
+  return { lines: out, changed };
 }

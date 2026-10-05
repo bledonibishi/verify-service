@@ -1,4 +1,4 @@
-import { approximateTd1Candidates } from './align';
+import { approximateTd1Candidates, fixLayoutLiterals } from './align';
 import { ParseOptions, Td1Result, parseTd1 } from './td1';
 
 /**
@@ -124,8 +124,15 @@ export function parseKosovoTd1(lines: string[], opts: ParseOptions = {}): Lenien
  */
 export function readKosovoMrz(ocrText: string, opts: ParseOptions = {}): LenientResult | null {
   const exact = extractTd1Lines(ocrText);
-  const first = exact ? parseKosovoTd1(exact, opts) : null;
-  if (first?.result.ok) return first;
+  // Fixed characters of the layout read as look-alikes (RK5 for RKS) are put right first
+  const fixed = exact ? fixLayoutLiterals(exact) : null;
+  const first = exact ? parseKosovoTd1(fixed!.lines, opts) : null;
+  if (first?.result.ok) {
+    if (fixed!.changed && !first.result.issues.some((i) => i.code === 'OCR_REPAIRED')) {
+      first.result.issues.push({ code: 'OCR_REPAIRED', severity: 'warning', message: 'MRZ line lengths or characters were corrected after OCR' });
+    }
+    return fixed!.changed ? { ...first, repaired: true } : first;
+  }
 
   // Closest fit first, but the check digits decide: a damaged triple must not hide a valid one
   let fallback: LenientResult | null = null;
