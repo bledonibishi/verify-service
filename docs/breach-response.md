@@ -40,7 +40,7 @@ Do these in order. Write the time and what you did for each; the log matters lat
 3. **Cut the access that is being abused**, the smallest thing that stops it:
    - Suspected stolen AWS keys: IAM console → the user → Security credentials → **Make inactive** the access key (then delete once confirmed). This stops S3, KMS and Rekognition use by that key.
    - Suspected server or role compromise: attach an explicit deny policy to the role, or **disable the KMS key** (KMS console → key → Key actions → Disable). With `KMS_DEK_CACHE_SECONDS=0` (the default) every document becomes unreadable at once; re-enable it after the cause is fixed. Do **not** schedule key deletion.
-   - Suspected tenant API key leak: the tenant must stop using the key. *Gap:* there is no key-rotation command yet; until one exists, create a new tenant and migrate, or add the command (see section 8).
+   - Suspected tenant API key leak: `pnpm tenant:rotate-key <tenantId>` issues a new key and stops the old one at once; give the new key to the tenant over a safe channel. Add `--webhook-secret` if the webhook secret may have leaked too (the tenant must update its verifier at the same moment). Use `--grace-hours=N` only when there is no sign of misuse.
    - Suspected reviewer account takeover: reset the password and 2FA with `pnpm reviewer` (see [review](review.md)); check which sessions that reviewer opened (`review.document_viewed` audit events).
    - Suspected data leak through a webhook: change the tenant's webhook URL and secret with `pnpm tenant:update`.
 4. **Stop the bleeding in the app** if needed: stop the service, or remove its network exposure, rather than deleting data.
@@ -74,7 +74,6 @@ Decision: **notifiable?** If it is likely to result in a risk to people, tenants
 
 ## 8. Gaps this plan exposes (to build)
 
-- A **tenant API key rotation** command (and revoking the old key) does not exist yet.
 - A **security event log** (logins, key use, reviewer actions beyond document views) is not recorded centrally; today only the per-session audit log and AWS CloudTrail exist.
 - **Alarms** are not set up: CloudWatch on KMS `Decrypt` rate and `AccessDenied` ([encryption](encryption.md), Operations), S3 access anomalies, repeated failed reviewer logins.
 - No documented **backup and restore** of the database; backups also hold personal data and have their own retention.
