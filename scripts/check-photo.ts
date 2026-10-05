@@ -7,7 +7,9 @@
  *
  * Needs `tesseract` installed. Nothing leaves this machine. Prints only pass/fail per check
  * and, with --shape, the OCR text with every digit shown as 9 and every letter as A, so the
- * output is safe to paste into a chat or issue. It never prints names, numbers or dates.
+ * output is safe to paste into a chat or issue. It never prints names, numbers or dates. The one
+ * exception: with --variants, the first five characters of line 1 (document type + RKS, the same
+ * on every Kosovo card) are shown, to diagnose a misread document type.
  */
 import { readFileSync } from 'fs';
 import { cleanMrzText, readKosovoMrz } from '../src/documents/mrz';
@@ -44,7 +46,7 @@ async function main() {
     // For each way of reading the photo: the length and shape of every line that could be an MRZ line
     const describe = (label: string, text: string) => {
       const lines = text.split(/\r?\n/).map(cleanMrzText).filter((l) => l.length >= 20);
-      console.log(`${label}: ${lines.length ? lines.map((l) => `${l.length}:${shape(l)}`).join('  |  ') : '(no long lines)'}`);
+      console.log(`${label}: ${lines.length ? lines.map((l) => `${l.length}:${shape(l)}${/^[A-Z]{5,8}[0-9]{6,}/.test(l) ? ` [starts ${l.slice(0, 5)}]` : ''}`).join('  |  ') : '(no long lines)'}`);
     };
     describe('as uploaded', asUploaded.text);
     let n = 0;
