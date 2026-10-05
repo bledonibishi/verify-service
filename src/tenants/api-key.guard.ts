@@ -20,8 +20,10 @@ export class ApiKeyGuard implements CanActivate {
     const match = value?.match(/^Bearer (.+)$/);
     if (!match) throw new UnauthorizedException('Missing API key');
 
-    const tenant = await this.prisma.tenant.findUnique({
-      where: { apiKeyHash: sha256(match[1]) },
+    const hash = sha256(match[1]);
+    // The current key, or a replaced one still inside its grace period
+    const tenant = await this.prisma.tenant.findFirst({
+      where: { OR: [{ apiKeyHash: hash }, { previousApiKeyHash: hash, previousApiKeyExpiresAt: { gt: new Date() } }] },
     });
     if (!tenant) throw new UnauthorizedException('Invalid API key');
     req.tenant = tenant;

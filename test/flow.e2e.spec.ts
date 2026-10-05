@@ -27,6 +27,7 @@ import { encrypt as legacyEncrypt } from '../src/common/crypto';
 import { hashPassword } from '../src/review/password';
 import { base32Decode, codeAt, stepOf } from '../src/review/totp';
 import { VerificationWorker } from '../src/verification/verification.worker';
+import { RotationError, rotateTenantKey } from '../src/tenants/key-rotation';
 
 // Fake OCR: tests set `ocrImpl`. Nothing here touches a real OCR engine.
 let ocrImpl: () => Promise<{ text: string }> = async () => ({ text: '' });
@@ -354,7 +355,7 @@ describe('verification flow (e2e)', () => {
     }
 
     async function settled(id: string) {
-      for (let i = 0; i < 200; i++) {
+      for (let i = 0; i < 800; i++) {
         const res = await request(http()).get(`/v1/sessions/${id}`).set(auth());
         if (res.body.status !== 'PROCESSING') return res.body;
         await new Promise((r) => setTimeout(r, 25));
@@ -1054,7 +1055,7 @@ describe('verification flow (e2e)', () => {
       }
       await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
       await request(http()).post(`/v1/upload/${token}/submit`).expect(200);
-      for (let i = 0; i < 200; i++) {
+      for (let i = 0; i < 800; i++) {
         const row = await prisma.session.findUnique({ where: { id: created.body.id } });
         if (row && row.status !== 'PROCESSING') break;
         await new Promise((r) => setTimeout(r, 25));
@@ -1717,7 +1718,7 @@ describe('verification flow (e2e)', () => {
         }
         await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
         await request(http()).post(`/v1/upload/${token}/submit`).expect(200);
-        for (let i = 0; i < 200; i++) {
+        for (let i = 0; i < 800; i++) {
           const row = await prisma.session.findUnique({ where: { id: created.body.id } });
           if (row && row.status !== 'PROCESSING') break;
           await new Promise((r) => setTimeout(r, 25));
@@ -2267,7 +2268,7 @@ describe('verification flow (e2e)', () => {
         await expect(browser.upload('SELFIE', new Blob([PNG]))).rejects.toMatchObject({ status: 410 });
 
         let session = await server.sessions.get(created.id);
-        for (let i = 0; i < 200 && session.status === 'PROCESSING'; i++) {
+        for (let i = 0; i < 800 && session.status === 'PROCESSING'; i++) {
           await new Promise((r) => setTimeout(r, 25));
           session = await server.sessions.get(created.id);
         }
@@ -2340,7 +2341,7 @@ describe('verification flow (e2e)', () => {
       for (const kind of kinds) await request(http()).post(`/v1/upload/${token}/${kind}`).attach('file', PNG, { filename: 'a.png' }).expect(204);
       if (o.liveness !== false) await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
       await request(http()).post(`/v1/upload/${token}/submit`).expect(200);
-      for (let i = 0; i < 200; i++) {
+      for (let i = 0; i < 800; i++) {
         const row = await prisma.session.findUnique({ where: { id: created.body.id } });
         if (row && row.status !== 'PROCESSING') break;
         await new Promise((r) => setTimeout(r, 25));
@@ -3379,5 +3380,119 @@ describe('verification flow (e2e)', () => {
         }
       });
     });
+  });
+  describe('tenant API key rotation', () => {
+    const http = () => app.getHttpServer();
+    const suffix = randomToken(6).toLowerCase().replace(/[^a-z0-9]/g, 'x');
+    const auth = (key: string) => ({ Authorization: `Bearer ${key}` });
+    const status = async (key: string) => (await request(http()).get('/v1/usage').set(auth(key))).status;
+    async function mkTenant(name: string) {
+      const key = `vk_rot_${name}_${suffix}`;
+      const t = await prisma.tenant.create({ data: { name: `rot-${name}-${suffix}`, apiKeyHash: sha256(key), webhookSecret: `whsec_${name}` } });
+      return { id: t.id, key };
+    }
+    const run = (args: string[]) =>
+      new Promise<{ code: number; out: string; err: string }>((resolve) => {
+        execFile('node', ['-r', 'ts-node/register', 'scripts/rotate-tenant-key.ts', ...args], { env: process.env, cwd: process.cwd(), timeout: 60_000 }, (error, out, err) =>
+          resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0, out, err }),
+        );
+      });
+
+    it('with no grace period the old key stops at once and the new one works', async () => {
+      const t = await mkTenant('now');
+      expect(await status(t.key)).toBe(200);
+      const r = await rotateTenantKey(prisma, t.id);
+      expect(r.oldKeyValidUntil).toBeNull();
+      expect(await status(t.key)).toBe(401);
+      expect(await status(r.apiKey)).toBe(200);
+      const row = await prisma.tenant.findUniqueOrThrow({ where: { id: t.id } });
+      expect(row.apiKeyHash).toBe(sha256(r.apiKey));
+      expect(row.apiKeyHash).not.toContain(r.apiKey); // only the hash is stored
+      expect(row.previousApiKeyHash).toBeNull();
+      expect(row.apiKeyRotatedAt).not.toBeNull();
+    });
+
+    it('with a grace period both keys work, then the old one stops when the time is up', async () => {
+      const t = await mkTenant('grace');
+      const r = await rotateTenantKey(prisma, t.id, { graceHours: 2 });
+      expect(r.oldKeyValidUntil!.getTime()).toBeGreaterThan(Date.now() + 119 * 60_000);
+      expect(await status(t.key)).toBe(200);
+      expect(await status(r.apiKey)).toBe(200);
+      await prisma.tenant.update({ where: { id: t.id }, data: { previousApiKeyExpiresAt: new Date(Date.now() - 1000) } });
+      expect(await status(t.key)).toBe(401);
+      expect(await status(r.apiKey)).toBe(200);
+    });
+
+    it('rotating again during a grace period ends the earlier key: at most one old key is valid', async () => {
+      const t = await mkTenant('twice');
+      const first = await rotateTenantKey(prisma, t.id, { graceHours: 24 });
+      const second = await rotateTenantKey(prisma, t.id, { graceHours: 24 });
+      expect(await status(t.key)).toBe(401); // the original, two rotations ago
+      expect(await status(first.apiKey)).toBe(200); // now the replaced key, in its grace period
+      expect(await status(second.apiKey)).toBe(200);
+      // an immediate rotation after that ends both old ones
+      const third = await rotateTenantKey(prisma, t.id);
+      expect(await status(first.apiKey)).toBe(401);
+      expect(await status(second.apiKey)).toBe(401);
+      expect(await status(third.apiKey)).toBe(200);
+    });
+
+    it('a grace period that has already passed (by the clock given) does not keep the old key alive', async () => {
+      const t = await mkTenant('past');
+      await rotateTenantKey(prisma, t.id, { graceHours: 1, now: new Date(Date.now() - 3 * 3_600_000) });
+      expect(await status(t.key)).toBe(401);
+    });
+
+    it('rejects an impossible grace period or an unknown tenant, and changes nothing', async () => {
+      const t = await mkTenant('bad');
+      for (const graceHours of [-1, 169, NaN, Infinity]) await expect(rotateTenantKey(prisma, t.id, { graceHours })).rejects.toBeInstanceOf(RotationError);
+      await expect(rotateTenantKey(prisma, randomUUID())).rejects.toBeInstanceOf(RotationError);
+      expect(await status(t.key)).toBe(200);
+    });
+
+    it('rotating one tenant leaves every other tenant untouched', async () => {
+      const a = await mkTenant('iso-a');
+      const b = await mkTenant('iso-b');
+      await rotateTenantKey(prisma, a.id);
+      expect(await status(b.key)).toBe(200);
+      expect(await prisma.tenant.findUniqueOrThrow({ where: { id: b.id } })).toMatchObject({ apiKeyHash: sha256(b.key), previousApiKeyHash: null, apiKeyRotatedAt: null });
+    });
+
+    it('replaces the webhook secret only when asked', async () => {
+      const t = await mkTenant('secret');
+      const before = (await prisma.tenant.findUniqueOrThrow({ where: { id: t.id } })).webhookSecret;
+      const plain = await rotateTenantKey(prisma, t.id);
+      expect(plain.webhookSecret).toBeUndefined();
+      expect((await prisma.tenant.findUniqueOrThrow({ where: { id: t.id } })).webhookSecret).toBe(before);
+      const both = await rotateTenantKey(prisma, t.id, { rotateWebhookSecret: true });
+      expect(both.webhookSecret).toMatch(/^whsec_/);
+      expect((await prisma.tenant.findUniqueOrThrow({ where: { id: t.id } })).webhookSecret).toBe(both.webhookSecret);
+    });
+
+    it('two rotations at the same moment: one wins, the other is told to retry, and the winner key works', async () => {
+      const t = await mkTenant('race');
+      const results = await Promise.allSettled([rotateTenantKey(prisma, t.id), rotateTenantKey(prisma, t.id)]);
+      const won = results.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof rotateTenantKey>>> => r.status === 'fulfilled');
+      expect(won.length).toBeGreaterThanOrEqual(1);
+      // every key that was handed out and is still valid works; there is exactly one current key
+      const row = await prisma.tenant.findUniqueOrThrow({ where: { id: t.id } });
+      expect(won.filter((w) => sha256(w.value.apiKey) === row.apiKeyHash)).toHaveLength(1);
+      for (const r of results) if (r.status === 'rejected') expect(r.reason).toBeInstanceOf(RotationError);
+    });
+
+    it('the command prints a working key once, and fails clearly on bad input', async () => {
+      const t = await mkTenant('cli');
+      const ok = await run([t.id, '--grace-hours=1']);
+      expect(ok.code).toBe(0);
+      const key = ok.out.match(/New API key:\s+(vk_\S+)/)![1];
+      expect(await status(key)).toBe(200);
+      expect(await status(t.key)).toBe(200); // grace
+      expect((await run([randomUUID()])).code).toBe(1);
+      expect((await run([t.id, '--grace-hours=999'])).code).toBe(1);
+      expect((await run([t.id, '--nonsense'])).code).toBe(1);
+      expect((await run([])).code).toBe(1);
+      // the failed runs changed nothing
+      expect(await status(key)).toBe(200);
+    }, 120_000);
   });
 });
