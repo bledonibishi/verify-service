@@ -84,3 +84,5 @@ Issue codes: `LICENCE_FRONT_MISSING`, `LICENCE_NOT_READABLE`, `LICENCE_FIELDS_IN
 ## Test data
 
 Never commit real documents. `fixtures/private/` is git-ignored for local samples. Tests use fictional cards from `src/documents/mrz/testing.ts`. To check a real card locally without exposing its data, run its OCR text through `pnpm check:mrz`, which prints only pass/fail results. To test a whole photo end to end the way the service reads it (including the cleaned-up variants), run `pnpm check:photo fixtures/private/<photo> [--shape]`; it needs `tesseract` installed and prints only pass/fail per check, plus with `--shape` the OCR text with digits shown as 9 and letters as A; `--variants` also prints the length and shape of every MRZ-like line each cleaned-up variant produces.
+
+To try the real face match once, with your own photos: `pnpm check:face fixtures/private/<id-front> fixtures/private/<selfie> --send-to-aws`. It sends both images to AWS Rekognition in `AWS_REGION` (using the credentials in `.env`), refuses to run without the flag, and prints only the outcome and similarity score. The IAM user needs `rekognition:CompareFaces`.

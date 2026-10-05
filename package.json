@@ -22,7 +22,8 @@
     "storage:reencrypt": "ts-node scripts/storage-reencrypt.ts",
     "storage:check": "ts-node scripts/check-storage.ts",
     "check:mrz": "ts-node scripts/check-mrz.ts",
-    "check:photo": "ts-node scripts/check-photo.ts"
+    "check:photo": "ts-node scripts/check-photo.ts",
+    "check:face": "ts-node scripts/check-face.ts"
   },
   "engines": {
     "node": ">=20.12"
