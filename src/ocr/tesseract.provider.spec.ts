@@ -99,6 +99,19 @@ describe('TesseractProvider tries cleaned-up images only when asked and only whe
     expect(f.runs()).toBeLessThanOrEqual(13);
   });
 
+  it('stays within the total time budget even when the engine hangs on the variants', async () => {
+    const counter = join(dir3, 'slow-count');
+    writeFileSync(counter, '');
+    const slow = join(dir3, 'slow');
+    // The first run answers at once; every later run hangs
+    writeFileSync(slow, `#!/bin/sh\ncat >/dev/null\necho x >> "${counter}"\nif [ $(wc -l < "${counter}") -le 1 ]; then echo BAD; else sleep 30; fi\n`);
+    chmodSync(slow, 0o755);
+    const started = Date.now();
+    const r = await new TesseractProvider(slow, 'eng', 30_000, 'eng', 4_000).readText(await photo(), { accept: () => false });
+    expect(r.text).toBe('BAD\n');
+    expect(Date.now() - started).toBeLessThan(8_000); // the budget, not 30 s per attempt
+  }, 30_000);
+
   it('never applies to printed text (licences)', async () => {
     const f = flaky(5);
     await new TesseractProvider(f.bin).readText(await photo(), { mode: 'text', accept: () => false });

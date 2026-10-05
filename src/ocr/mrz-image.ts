@@ -12,6 +12,8 @@ import sharp from 'sharp';
  */
 const MAX_INPUT_PIXELS = 60_000_000;
 const TARGET_WIDTH = 2200;
+/** The enlarged crop never exceeds this many pixels, whatever the shape of the upload (a tall, narrow image would otherwise grow enormous). */
+const MAX_WORK_PIXELS = 25_000_000;
 const BORDER = 60;
 
 /** Share of the photo's height to keep, from the bottom. 1 is the whole photo. */
@@ -43,20 +45,33 @@ export async function* mrzVariants(image: Buffer, opts: MrzVariantOptions = {}):
   let produced = 0;
   for (const share of shares) {
     const top = Math.round(height * (1 - share));
+    const cropHeight = height - top;
+    if (produced >= max) return;
+    // Enlarge to about TARGET_WIDTH, but never past the pixel budget
+    let targetWidth = Math.max(width, TARGET_WIDTH);
+    if (targetWidth * Math.ceil((cropHeight * targetWidth) / width) > MAX_WORK_PIXELS) {
+      targetWidth = Math.max(1, Math.floor(Math.sqrt((MAX_WORK_PIXELS * width) / cropHeight)));
+    }
+    // The expensive part depends only on the crop, so it is done once and shared by the thresholds.
+    // Two passes: sharp applies its operations in a fixed internal order, not the order they are
+    // chained, and the threshold must come after the contrast work.
+    let enhanced: Buffer;
+    try {
+      enhanced = await sharp(image, { limitInputPixels: MAX_INPUT_PIXELS })
+        .rotate()
+        .extract({ left: 0, top, width, height: cropHeight })
+        .greyscale()
+        .resize({ width: targetWidth })
+        .normalise()
+        .clahe({ width: 48, height: 48, maxSlope: 3 })
+        .png()
+        .toBuffer();
+    } catch {
+      continue; // this crop could not be made; the next may
+    }
     for (const level of THRESHOLDS) {
       if (produced >= max) return;
       try {
-        // Two passes: sharp applies its operations in a fixed internal order, not the order they
-        // are chained, and the threshold must come after the contrast work
-        const enhanced = await sharp(image, { limitInputPixels: MAX_INPUT_PIXELS })
-          .rotate()
-          .extract({ left: 0, top, width, height: height - top })
-          .greyscale()
-          .resize({ width: Math.max(width, TARGET_WIDTH), withoutReduction: true })
-          .normalise()
-          .clahe({ width: 48, height: 48, maxSlope: 3 })
-          .png()
-          .toBuffer();
         let pipe = sharp(enhanced);
         if (level !== null) pipe = pipe.threshold(level);
         // Mirrored edges, not a white frame: a frame turns a grey background into a dark box

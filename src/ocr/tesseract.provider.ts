@@ -2,6 +2,9 @@ import { spawn } from 'child_process';
 import { mrzVariants } from './mrz-image';
 import { OcrError, OcrOptions, OcrProvider, OcrResult, OcrUnavailableError } from './ocr-provider';
 
+/** Not worth starting another attempt with less time than this left. */
+const MIN_ATTEMPT_MS = 2_000;
+
 /**
  * Self-hosted OCR through the `tesseract` command line. The image goes in on stdin and the text
  * comes back on stdout, so nothing is written to disk in the clear. The character whitelist fits
@@ -16,6 +19,11 @@ export class TesseractProvider implements OcrProvider {
     private readonly timeoutMs = 30_000,
     /** Languages for printed text (licences); the MRZ uses `lang`. e.g. `eng+sqi` once the Albanian data is installed. */
     private readonly textLang = 'eng',
+    /**
+     * Total time one MRZ read may take, first attempt included. Kept well under the worker's job
+     * lease so a photo that never reads cannot outlive it and be claimed twice.
+     */
+    private readonly mrzBudgetMs = 60_000,
   ) {}
 
   async readText(image: Buffer, options: OcrOptions = {}): Promise<OcrResult> {
@@ -23,16 +31,18 @@ export class TesseractProvider implements OcrProvider {
     // text is read without one.
     if (options.mode === 'text') return this.run(image, ['stdin', 'stdout', '-l', this.textLang, '--psm', '4']);
     const args = ['stdin', 'stdout', '-l', this.lang, '--psm', '6', '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<'];
+    const deadline = Date.now() + this.mrzBudgetMs;
     const first = await this.run(image, args);
     if (!options.accept || options.accept(first.text)) return first;
 
     // The photo as given did not read. Try cleaned-up versions, within a time budget, and fall
     // back to the first reading (which the caller will report as unreadable) if none works.
-    const deadline = Date.now() + this.timeoutMs * 3;
     for await (const variant of mrzVariants(image)) {
-      if (Date.now() > deadline) break;
+      const remaining = deadline - Date.now();
+      if (remaining < MIN_ATTEMPT_MS) break;
       try {
-        const next = await this.run(variant, args);
+        // A run never goes past the budget either, so the total is bounded, not just the start
+        const next = await this.run(variant, args, Math.min(this.timeoutMs, remaining));
         if (options.accept(next.text)) return next;
       } catch (err) {
         if (err instanceof OcrUnavailableError) throw err;
@@ -42,7 +52,7 @@ export class TesseractProvider implements OcrProvider {
     return first;
   }
 
-  private run(image: Buffer, args: string[]): Promise<OcrResult> {
+  private run(image: Buffer, args: string[], timeoutMs = this.timeoutMs): Promise<OcrResult> {
     return new Promise((resolve, reject) => {
       const child = spawn(this.binary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
       const chunks: Buffer[] = [];
@@ -57,7 +67,7 @@ export class TesseractProvider implements OcrProvider {
       const timer = setTimeout(() => {
         child.kill('SIGKILL');
         done(() => reject(new OcrError('timeout')));
-      }, this.timeoutMs);
+      }, timeoutMs);
 
       child.stdout.on('data', (c: Buffer) => {
         size += c.length;

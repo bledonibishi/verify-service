@@ -55,6 +55,18 @@ describe('mrzVariants', () => {
     }
   });
 
+  it('keeps the enlarged crop within the pixel budget for a tall, narrow upload', async () => {
+    // 100 x 6000 is only 0.6 MP, but enlarging it to 2200 wide would make 290 MP
+    const narrow = await sharp({ create: { width: 100, height: 6000, channels: 3, background: '#cccccc' } }).png().toBuffer();
+    let count = 0;
+    for await (const v of mrzVariants(narrow)) {
+      const m = await sharp(v).metadata();
+      expect(m.width! * m.height!).toBeLessThanOrEqual(30_000_000);
+      count++;
+    }
+    expect(count).toBeGreaterThan(0);
+  }, 60_000);
+
   it('refuses an enormous image instead of allocating it', async () => {
     const huge = await sharp({ create: { width: 8000, height: 8000, channels: 3, background: '#ffffff' } }).png({ compressionLevel: 9 }).toBuffer();
     const out: Buffer[] = [];
