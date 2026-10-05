@@ -10,7 +10,7 @@ import { FACE_PROVIDER, FaceProvider, FaceUnavailableError } from '../face/face-
 import { LIVENESS_PROVIDER, LivenessProvider, LivenessUnavailableError } from '../liveness/liveness-provider';
 import { checkLicence, LicenceOutcome } from '../documents/licence';
 import type { Td1Data } from '../documents/mrz';
-import { CheckOutcome, LivenessOutcome, bindFaceToLiveness, livenessOutcome, withLiveness, FaceOutcome, readIdBack, decide, emptyOutcome, faceOutcome, withFace, withLicence } from './decision';
+import { CheckOutcome, LivenessOutcome, bindFaceToLiveness, livenessOutcome, withLiveness, FaceOutcome, readIdBack, mrzReadable, decide, emptyOutcome, faceOutcome, withFace, withLicence } from './decision';
 import { toSummary } from './summary';
 
 const MAX_ATTEMPTS = 3;
@@ -152,7 +152,7 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     } else {
       const image = await this.storage.get(back.storageKey);
       try {
-        const { text } = await this.ocr.readText(image);
+        const { text } = await this.ocr.readText(image, { accept: (t) => mrzReadable(t) });
         const read = readIdBack(text, {
           firstName: session.expectedFirstName ?? undefined,
           lastName: session.expectedLastName ?? undefined,

@@ -140,6 +140,11 @@ export function readKosovoMrz(ocrText: string, opts: ParseOptions = {}): Lenient
       }
       return { ...r, repaired: true };
     }
+    if (r.result.ok && !shapeOk) {
+      // The check digits passed but the fields have the wrong shape: this is a guess, not a read
+      r.result.ok = false;
+      r.result.issues.push({ code: 'MRZ_SHAPE_INVALID', severity: 'error', message: 'Repaired MRZ fields do not have the shape of a Kosovo card' });
+    }
     fallback ??= r;
   }
   // Nothing passed: report the exact reader's result, else the closest candidate's, rather than pretend

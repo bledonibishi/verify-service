@@ -7,17 +7,17 @@
  * so the output is safe to paste into a chat or issue.
  */
 import { readFileSync } from 'fs';
-import { extractTd1Lines, parseKosovoTd1 } from '../src/documents/mrz';
+import { readKosovoMrz } from '../src/documents/mrz';
 
 const text = readFileSync(0, 'utf8');
-const lines = extractTd1Lines(text);
+const read = readKosovoMrz(text);
 
-if (!lines) {
-  console.log('MRZ: not found (need three lines of 30 characters)');
+if (!read) {
+  console.log('MRZ: not found (need three lines of about 30 characters)');
   process.exit(1);
 }
 
-const { result, repaired } = parseKosovoTd1(lines);
+const { result, repaired } = read;
 console.log(`MRZ found, structure ${result.ok ? 'OK' : 'INVALID'}${repaired ? ' (needed OCR repair)' : ''}`);
 for (const c of result.checks) console.log(`  check digit ${c.field}: ${c.ok ? 'pass' : 'FAIL'}`);
 for (const i of result.issues) console.log(`  ${i.severity}: ${i.code}`);

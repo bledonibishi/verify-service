@@ -140,6 +140,16 @@ describe('readKosovoMrz with lines of the wrong length', () => {
     expect(lostDigit?.result.ok ?? false).toBe(false);
   });
 
+  it('reports a repaired read with the wrong field shape as not valid, never as a read', () => {
+    // A lost trailing zero of the personal number passes the check digits (a `<` weighs 0)...
+    const p = buildTd1({ ...SAMPLE, personalNumber: '1087354000' });
+    const lost = [p[0], p[1].slice(0, 27) + p[1].slice(28), p[2]]; // 29 characters: one zero gone
+    const r = read(lost.join('\n'));
+    // ...so it must not come back ok, nor be marked as a clean read
+    expect(r?.result.ok ?? false).toBe(false);
+    expect(r?.result.issues.map((i) => i.code)).toContain('MRZ_SHAPE_INVALID');
+  });
+
   it('does not invent an MRZ out of ordinary text or noise', () => {
     expect(read('Republika e Kosoves Republic of Kosovo\nLetërnjoftim Identity Card\nDate of issue\nResidence')).toBeNull();
     expect(read('QWERTYUIOPASDFGHJKLZXCVBNM1234\nASDFGHJKLQWERTYUIOPZXCVBNM5678\nZXCVBNMASDFGHJKLQWERTYUIOP9012')?.result.ok ?? false).toBe(false);
