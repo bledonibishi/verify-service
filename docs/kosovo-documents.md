@@ -31,6 +31,16 @@ Check digits use the standard 7-3-1 weighting. The composite digit covers line 1
 - **Validity.** Both observed cards were issued 30.01.2024 and expire 29.01.2029, i.e. five years. Whether this varies is unconfirmed.
 - The card is printed in Albanian, Serbian (Cyrillic) and English.
 
+### OCR lines of the wrong length (`src/documents/mrz/align.ts`)
+
+Tesseract reads the characters of an MRZ well but miscounts runs of `<`, so a line that should be 30 characters comes back as 27 or 31, often with a short junk line (a field label) next to it. `readKosovoMrz` first tries the exact reader; if that fails it aligns each line to the known layout of its line and repairs it. The repair is deliberately narrow:
+
+- It only adds or removes `<` fillers (and treats a stray letter in a filler run as a look-alike). It never invents a digit or chooses which of two digits is extra, because the check digits would then confirm a wrong guess about one time in ten by chance.
+- The result is accepted only if every check digit passes **and** the personal number is 10 digits, the document number is 2 letters + 7 digits and optional data 1 is empty (a `<` and a `0` weigh the same in a check digit, so a lost trailing zero would otherwise pass).
+- A repaired read carries the `OCR_REPAIRED` warning so the decision logic and reviewers can see it.
+
+Known limit, shared with the exact reader: check digits cannot catch every error (a letter and a digit can weigh the same, e.g. `R` read as `7`).
+
 ## Driving licence
 
 - **No MRZ**, so there are no check digits. Verification relies on reading the printed fields and cross-checking them against the ID.
