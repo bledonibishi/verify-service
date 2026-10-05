@@ -12,7 +12,10 @@ export interface LivenessProvider {
 
 export interface LivenessSession {
   providerSessionId: string;
-  /** Anything the client widget needs besides the id. Must hold no secrets beyond the session. */
+  /**
+   * Anything the client widget needs besides the id. Sent to that one browser only: it may hold
+   * short-lived credentials limited to running this challenge, never anything long-lived.
+   */
   clientConfig?: Record<string, unknown>;
 }
 

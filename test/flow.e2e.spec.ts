@@ -661,6 +661,7 @@ describe('verification flow (e2e)', () => {
         const { token, id } = await startToken('live-start');
         const res = await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
         expect(res.body).toMatchObject({ provider: 'fake-live', sessionId: expect.stringMatching(/^live-/) });
+        expect(res.headers['cache-control']).toBe('no-store'); // the reply can carry short-lived credentials
         const row = await prisma.session.findUnique({ where: { id } });
         expect(row?.livenessSessionId).toBe(res.body.sessionId);
         expect((await prisma.auditLog.findMany({ where: { sessionId: id } })).map((l) => l.event)).toContain('liveness.started');
