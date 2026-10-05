@@ -1,10 +1,11 @@
-import { ConflictException, GoneException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, GoneException, Injectable, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { DocumentKind, Reviewer, SessionStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
-import { StorageService, StoredObjectMissingError } from '../storage/storage.service';
+import { KeyUnavailableError, StorageService, StoredObjectMissingError } from '../storage/storage.service';
 import { toSummary } from '../verification/summary';
 import { reviewSummary } from './review-summary';
-import { WebhooksService } from '../webhooks/webhooks.service';
+import { OutboxService } from '../webhooks/outbox.service';
+import { WebhookDispatcher } from '../webhooks/dispatcher';
 
 const PAGE = 25;
 
@@ -14,7 +15,8 @@ export class ReviewService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly storage: StorageService,
-    private readonly webhooks: WebhooksService,
+    private readonly outbox: OutboxService,
+    private readonly dispatcher: WebhookDispatcher,
   ) {}
 
   async queue(reviewer: Reviewer, cursor?: string) {
@@ -74,6 +76,8 @@ export class ReviewService {
       data = await this.storage.get(doc.storageKey);
     } catch (err) {
       if (err instanceof StoredObjectMissingError) throw new GoneException('Document was deleted');
+      // The key service is down or refusing: say so (and let the reviewer try again) instead of a bare server error
+      if (err instanceof KeyUnavailableError) throw new ServiceUnavailableException('Document storage is temporarily unavailable');
       throw err;
     }
     await this.prisma.auditLog.create({
@@ -96,22 +100,23 @@ export class ReviewService {
       await tx.auditLog.create({
         data: { sessionId: id, event: 'review.decided', detail: { decision, reviewerId: reviewer.id, hasReason: !!reason } },
       });
-      return tx.session.findFirstOrThrow({ where: { id, tenantId: reviewer.tenantId }, include: { tenant: true, result: true } });
+      const s = await tx.session.findFirstOrThrow({ where: { id, tenantId: reviewer.tenantId }, include: { tenant: true, result: true } });
+      // Queued in this transaction: the webhook exists if and only if the decision committed
+      const queued = await this.outbox.enqueue(tx, s.tenant, {
+        sessionId: s.id,
+        externalRef: s.externalRef,
+        status: s.status,
+        verification: s.result ? toSummary(s.result) : undefined,
+        review: reviewSummary(s),
+      });
+      return { status: s.status, queued };
     });
     if (!outcome) {
       const exists = await this.prisma.session.findFirst({ where: { id, tenantId: reviewer.tenantId }, select: { id: true } });
       if (!exists) throw new NotFoundException('Session not found');
       throw new ConflictException('Session is not waiting for review');
     }
-    void this.webhooks.send(outcome.tenant, {
-      type: 'session.status_changed',
-      sessionId: outcome.id,
-      externalRef: outcome.externalRef,
-      status: outcome.status,
-      occurredAt: new Date().toISOString(),
-      verification: outcome.result ? toSummary(outcome.result) : undefined,
-      review: reviewSummary(outcome),
-    });
+    if (outcome.queued) void this.dispatcher.wake();
     return { status: outcome.status };
   }
 }

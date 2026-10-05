@@ -51,9 +51,9 @@ The migration sets every **existing** tenant's document window equal to its reco
 
 ## Known gaps
 
-- **All instances must share one storage.** The local-disk adapter is single-host: with several hosts each holding its own directory, a job on a host without the file would treat "not there" as erased. Use shared storage (the S3 adapter, task 5) before running more than one instance.
+- **All instances must share one storage.** The local-disk driver is single-host: with several hosts each holding its own directory, a job on a host without the file would treat "not there" as erased. Use `STORAGE_DRIVER=s3` ([storage](storage.md)) before running more than one instance, and keep bucket **versioning off**, or deleted objects survive as old versions.
 
-- Deleting from the S3 adapter (task 5) must keep the same files-before-rows order and handle object versioning.
+- The S3 driver keeps the same files-before-rows order; bucket versioning must stay off (see [storage](storage.md)).
 - Backups are outside this service: a database or disk backup keeps data until the backup itself expires.
-- The webhook outbox (task 5) will hold event payloads; those need the same erasure when it lands.
+- Webhook events (the outbox) are erased with their session; delivered events are also deleted after `WEBHOOK_EVENT_RETENTION_DAYS` (7) and failed ones after `WEBHOOK_FAILED_RETENTION_DAYS` (30). A pending event for a tenant that is down can live as long as its retries last (about a day), then becomes `FAILED`. A decided session is **not** erased by retention while one of its events is still `PENDING`, even with a zero-day window, so a committed decision is never lost before the tenant is told; an explicit `DELETE /v1/sessions/:id` still erases immediately. Failed events are kept for `WEBHOOK_FAILED_RETENTION_DAYS` counted from when they last failed, so a replayed event gets a fresh window.
 - Reviewer accounts and the tenant's own copies of data are the tenant's responsibility.

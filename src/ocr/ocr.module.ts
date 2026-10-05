@@ -11,7 +11,7 @@ import { TesseractProvider } from './tesseract.provider';
       useFactory: (config: ConfigService): OcrProvider => {
         const name = config.get<string>('OCR_PROVIDER') ?? 'tesseract';
         if (name === 'tesseract') {
-          return new TesseractProvider(config.get('TESSERACT_BIN') || 'tesseract', config.get('TESSERACT_LANG') || 'eng');
+          return new TesseractProvider(config.get('TESSERACT_BIN') || 'tesseract', config.get('TESSERACT_LANG') || 'eng', 30_000, config.get('TESSERACT_TEXT_LANG') || 'eng');
         }
         throw new Error(`Unknown OCR_PROVIDER "${name}"`);
       },

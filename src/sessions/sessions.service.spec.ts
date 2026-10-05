@@ -4,9 +4,11 @@ import { SessionsService } from './sessions.service';
 
 function make(ttl: string | undefined) {
   const create = jest.fn(async ({ data }) => ({ id: 's1', status: 'PENDING', expiresAt: data.expiresAt }));
-  const prisma = { session: { create } } as any;
+  const tx = { session: { create } };
+  const prisma = { $transaction: async (fn: (t: unknown) => unknown) => fn(tx) } as any;
+  const usage = { assertWithinCap: async () => ({}), logWarning: () => undefined } as any;
   const config = { get: (k: string) => (k === 'SESSION_TTL_MINUTES' ? ttl : 'http://x') } as unknown as ConfigService;
-  return { service: new SessionsService(prisma, config), create };
+  return { service: new SessionsService(prisma, config, usage), create };
 }
 
 describe('SessionsService TTL', () => {

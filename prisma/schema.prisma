@@ -20,12 +20,20 @@ enum DocumentKind {
   ID_FRONT
   ID_BACK
   SELFIE
+  // Driving licence: the front is read (printed fields), the back is stored for reviewers only
+  LICENCE_FRONT
+  LICENCE_BACK
 }
 
 model Tenant {
   id            String    @id @default(uuid())
   name          String
   apiKeyHash    String    @unique @map("api_key_hash")
+  // After a rotation with a grace period the replaced key still works until this time, so a
+  // tenant can switch without downtime. Rotating with no grace period clears both.
+  previousApiKeyHash      String?   @unique @map("previous_api_key_hash")
+  previousApiKeyExpiresAt DateTime? @map("previous_api_key_expires_at")
+  apiKeyRotatedAt         DateTime? @map("api_key_rotated_at")
   webhookUrl    String?   @map("webhook_url")
   webhookSecret String    @map("webhook_secret")
   // When true, a submission whose automated checks all pass cleanly is approved without a
@@ -38,6 +46,17 @@ model Tenant {
   createdAt     DateTime  @default(now()) @map("created_at")
   sessions      Session[]
   reviewers     Reviewer[]
+  webhookEvents WebhookEvent[]
+  usageEvents   UsageEvent[]
+  // When true, every reviewer of this tenant must have two-factor sign-in: one who has not set it up
+  // can only reach the setup screens until they do
+  requireReviewerTwoFactor Boolean @default(false) @map("require_reviewer_two_factor")
+  // Cost protection: once this many verifications are billable or in flight in a UTC month,
+  // creating another session answers 429. Null means no cap.
+  monthlyVerificationCap Int? @map("monthly_verification_cap")
+  // A warning is logged (once a month) when usage reaches this percent of the cap
+  softLimitPercent       Int  @default(80) @map("soft_limit_percent")
+  softLimitNotifiedMonth String? @map("soft_limit_notified_month")
   // Documents (images) are deleted this many days after the final decision. 0 = right away.
   documentRetentionDays Int @default(30) @map("document_retention_days")
   // The whole session record (results, audit log, expected identity) is deleted this many days
@@ -63,12 +82,15 @@ model Session {
   expectedBirthDate String? @map("expected_birth_date")
   // Set when the user starts a liveness challenge; the result is read by the pipeline
   livenessSessionId String? @map("liveness_session_id")
+  // When true the user must also upload a driving licence, which is read and cross-checked with the ID
+  requireLicence Boolean @default(false) @map("require_licence")
   expiresAt   DateTime      @map("expires_at")
   createdAt   DateTime      @default(now()) @map("created_at")
   updatedAt   DateTime      @updatedAt @map("updated_at")
   documents   Document[]
   auditLogs   AuditLog[]
   job         VerificationJob?
+  webhookEvents WebhookEvent[]
   result      VerificationResult?
   // Set when a reviewer decides a NEEDS_REVIEW session
   reviewedById   String?   @map("reviewed_by_id")
@@ -168,6 +190,18 @@ model VerificationResult {
   livenessStatus     String? @map("liveness_status")
   livenessConfidence Float?  @map("liveness_confidence")
   livenessProvider   String? @map("liveness_provider")
+  // Driving licence checks; null when the session did not ask for a licence. Flags and field NAMES
+  // only: no value printed on the licence is stored.
+  licenceFound            Boolean?  @map("licence_found")
+  licenceFields           String[]  @default([]) @map("licence_fields")
+  licenceExpired          Boolean?  @map("licence_expired")
+  licenceDatesValid       Boolean?  @map("licence_dates_valid")
+  licenceRepaired         Boolean?  @map("licence_repaired")
+  // match | mismatch | unavailable (the ID could not be read, so there was nothing to compare with)
+  licencePersonalNumberMatch String? @map("licence_personal_number_match")
+  licenceSurnameMatch     String?   @map("licence_surname_match")
+  licenceGivenNamesMatch  String?   @map("licence_given_names_match")
+  licenceBirthDateMatch   String?   @map("licence_birth_date_match")
   createdAt       DateTime @default(now()) @map("created_at")
 
   @@map("verification_results")
@@ -188,6 +222,14 @@ model Reviewer {
   createdAt      DateTime          @default(now()) @map("created_at")
   sessions       ReviewerSession[]
   decisions      Session[]
+  // Authenticator secret, sealed with the storage key provider (never stored in the clear). Present
+  // with totpEnabledAt null = set up but not yet confirmed with a code.
+  totpSecretSealed String?         @map("totp_secret_sealed")
+  totpEnabledAt    DateTime?       @map("totp_enabled_at")
+  // The last 30-second step a code was accepted for; a code for that step or earlier is refused (replay)
+  totpLastStep     Int?            @map("totp_last_step")
+  recoveryCodes    RecoveryCode[]
+  challenges       LoginChallenge[]
 
   @@index([tenantId])
   @@map("reviewers")
@@ -220,4 +262,98 @@ model DeletionRecord {
 
   @@index([tenantId, deletedAt])
   @@map("deletion_records")
+}
+
+enum WebhookEventStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+// Outbox: written in the same transaction as the status change it announces, delivered by a
+// worker with retries. The body is stored exactly as sent so every attempt is byte-identical.
+model WebhookEvent {
+  id            String             @id @default(uuid())
+  tenantId      String             @map("tenant_id")
+  tenant        Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  // Erasing a session erases its pending and past events
+  sessionId     String             @map("session_id")
+  session       Session            @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  type          String
+  body          String
+  status        WebhookEventStatus @default(PENDING)
+  attempts      Int                @default(0)
+  // Bumped on every claim and never reset (a replay resets `attempts`): it fences outcomes so a
+  // stale in-flight delivery can never match a later claim of the same event
+  claims        Int                @default(0)
+  nextAttemptAt DateTime           @default(now()) @map("next_attempt_at")
+  lockedUntil   DateTime?          @map("locked_until")
+  // http_<status> | timeout | network | redirect | no_url: a fixed code, never the response body
+  lastError     String?            @map("last_error")
+  deliveredAt   DateTime?          @map("delivered_at")
+  // When it last entered FAILED; failed-event retention counts from here, not from creation
+  failedAt      DateTime?          @map("failed_at")
+  createdAt     DateTime           @default(now()) @map("created_at")
+
+  @@index([status, nextAttemptAt])
+  @@index([tenantId, createdAt])
+  @@map("webhook_events")
+}
+
+// One row per completed verification (kind "verification"), or an operator correction (kind
+// "adjustment", negative quantity for a credit). Written in the same transaction as the decision.
+// Holds ids, times and booleans only. session_id is deliberately not a foreign key: erasing a
+// person (retention or a data-subject request) must not erase the invoice trail.
+model UsageEvent {
+  id                String   @id @default(uuid())
+  tenantId          String   @map("tenant_id")
+  tenant            Tenant   @relation(fields: [tenantId], references: [id])
+  // verification | adjustment
+  kind              String   @default("verification")
+  // Null for adjustments. Unique per kind, so a session is counted once however often it is processed.
+  sessionId         String?  @map("session_id")
+  occurredAt        DateTime @map("occurred_at")
+  quantity          Int      @default(1)
+  billable          Boolean  @default(true)
+  // pipeline_error | ocr_unavailable: our failures, recorded but not billed
+  nonBillableReason String?  @map("non_billable_reason")
+  face              Boolean  @default(false)
+  liveness          Boolean  @default(false)
+  licence           Boolean  @default(false)
+  autoDecided       Boolean  @default(false) @map("auto_decided")
+  // Operator note on an adjustment (never personal data)
+  note              String?
+  createdAt         DateTime @default(now()) @map("created_at")
+
+  @@unique([sessionId, kind])
+  @@index([tenantId, occurredAt])
+  @@map("usage_events")
+}
+
+// Single-use codes for a lost authenticator. Only a hash is stored.
+model RecoveryCode {
+  id         String    @id @default(uuid())
+  reviewerId String    @map("reviewer_id")
+  reviewer   Reviewer  @relation(fields: [reviewerId], references: [id], onDelete: Cascade)
+  codeHash   String    @map("code_hash")
+  usedAt     DateTime? @map("used_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  @@index([reviewerId])
+  @@map("recovery_codes")
+}
+
+// Between the password step and the second factor: proves the password was right, grants nothing.
+// Short-lived, a handful of attempts, only its hash is stored.
+model LoginChallenge {
+  id         String   @id @default(uuid())
+  reviewerId String   @map("reviewer_id")
+  reviewer   Reviewer @relation(fields: [reviewerId], references: [id], onDelete: Cascade)
+  tokenHash  String   @unique @map("token_hash")
+  expiresAt  DateTime @map("expires_at")
+  attempts   Int      @default(0)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([reviewerId])
+  @@map("login_challenges")
 }

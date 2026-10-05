@@ -2,6 +2,8 @@ node_modules/
 dist/
 coverage/
 .env
+.env.local
+.env.example
 .env.*
 !.env.example
 .DS_Store
@@ -11,3 +13,5 @@ coverage/
 # Real ID/licence samples must never be committed
 fixtures/private/
 *.private.*
+
+/sdk/dist/

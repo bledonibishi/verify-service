@@ -1,3 +1,4 @@
+import { approximateTd1Candidates, fixLayoutLiterals } from './align';
 import { ParseOptions, Td1Result, parseTd1 } from './td1';
 
 /**
@@ -113,4 +114,46 @@ export function parseKosovoTd1(lines: string[], opts: ParseOptions = {}): Lenien
   }
 
   return { result: direct, lines: clean, repaired: false };
+}
+
+/**
+ * Reads the MRZ out of raw OCR text. A clean read is parsed as it is. Otherwise lines of the wrong
+ * length (OCR miscounts runs of `<`) are aligned to the card's layout, and the result is accepted
+ * only if every check digit passes; then it is reported as repaired, like any other OCR correction,
+ * so a person still looks at it before anything is approved automatically.
+ */
+export function readKosovoMrz(ocrText: string, opts: ParseOptions = {}): LenientResult | null {
+  const exact = extractTd1Lines(ocrText);
+  // Fixed characters of the layout read as look-alikes (RK5 for RKS) are put right first
+  const fixed = exact ? fixLayoutLiterals(exact) : null;
+  const first = exact ? parseKosovoTd1(fixed!.lines, opts) : null;
+  if (first?.result.ok) {
+    if (fixed!.changed && !first.result.issues.some((i) => i.code === 'OCR_REPAIRED')) {
+      first.result.issues.push({ code: 'OCR_REPAIRED', severity: 'warning', message: 'MRZ line lengths or characters were corrected after OCR' });
+    }
+    return fixed!.changed ? { ...first, repaired: true } : first;
+  }
+
+  // Closest fit first, but the check digits decide: a damaged triple must not hide a valid one
+  let fallback: LenientResult | null = null;
+  for (const approx of approximateTd1Candidates(ocrText)) {
+    const r = parseKosovoTd1(approx.lines, opts);
+    // A `<` weighs the same as a `0` in a check digit, so a lost trailing zero would pass them.
+    // A repaired read must therefore also have the exact shape of a Kosovo card's fields.
+    const shapeOk = !r.result.issues.some((i) => i.code === 'PERSONAL_NUMBER_FORMAT' || i.code === 'DOCUMENT_NUMBER_FORMAT' || i.code === 'OPTIONAL_DATA_PRESENT');
+    if (r.result.ok && shapeOk) {
+      if (!r.result.issues.some((i) => i.code === 'OCR_REPAIRED')) {
+        r.result.issues.push({ code: 'OCR_REPAIRED', severity: 'warning', message: 'MRZ line lengths or characters were corrected after OCR' });
+      }
+      return { ...r, repaired: true };
+    }
+    if (r.result.ok && !shapeOk) {
+      // The check digits passed but the fields have the wrong shape: this is a guess, not a read
+      r.result.ok = false;
+      r.result.issues.push({ code: 'MRZ_SHAPE_INVALID', severity: 'error', message: 'Repaired MRZ fields do not have the shape of a Kosovo card' });
+    }
+    fallback ??= r;
+  }
+  // Nothing passed: report the exact reader's result, else the closest candidate's, rather than pretend
+  return first ?? fallback;
 }

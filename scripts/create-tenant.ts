@@ -2,6 +2,7 @@
  * Usage: pnpm tenant:create "<name>" [webhookUrl] [options]
  *   --auto-approve  --face-threshold=90  --liveness-threshold=90
  *   --doc-retention-days=30  --record-retention-days=1825  --evidence-export
+ *   --monthly-cap=N|none  --soft-limit=80
  * Prints the API key and webhook secret once; only the key's hash is stored.
  */
 import { PrismaClient } from '@prisma/client';
@@ -40,6 +41,8 @@ async function main() {
   console.log(`Liveness min:     ${tenant.livenessMinConfidence}`);
   console.log(`Documents kept:   ${tenant.documentRetentionDays} days after the decision`);
   console.log(`Records kept:     ${tenant.recordRetentionDays} days after the decision`);
+  console.log(`Monthly cap:      ${tenant.monthlyVerificationCap ?? 'none'} (warn at ${tenant.softLimitPercent}%)`);
+  console.log(`Reviewer 2FA:     ${tenant.requireReviewerTwoFactor ? 'required' : 'optional'}`);
   console.log(`Evidence export:  ${tenant.evidenceExport ? 'on' : 'off'}`);
   console.log(`API key:          ${apiKey}`);
   console.log(`Webhook secret:   ${webhookSecret}`);

@@ -9,6 +9,15 @@ export interface VerificationSummary {
   expired: boolean | null;
   face: { status: string | null; similarity: number | null; provider: string | null; source: string | null };
   liveness: { status: string | null; confidence: number | null; provider: string | null };
+  /** Present only for sessions that asked for a driving licence. Flags and field numbers, never values. */
+  licence: {
+    found: boolean;
+    fields: string[];
+    expired: boolean | null;
+    datesValid: boolean | null;
+    repaired: boolean | null;
+    crossCheck: { personalNumber: string | null; surname: string | null; givenNames: string | null; birthDate: string | null };
+  } | null;
   checks: unknown;
   issues: string[];
 }
@@ -22,6 +31,22 @@ export function toSummary(r: VerificationResult): VerificationSummary {
     expired: r.expired,
     face: { status: r.faceStatus, similarity: r.faceSimilarity, provider: r.faceProvider, source: r.faceSource },
     liveness: { status: r.livenessStatus, confidence: r.livenessConfidence, provider: r.livenessProvider },
+    licence:
+      r.licenceFound === null
+        ? null
+        : {
+            found: r.licenceFound,
+            fields: r.licenceFields,
+            expired: r.licenceExpired,
+            datesValid: r.licenceDatesValid,
+            repaired: r.licenceRepaired,
+            crossCheck: {
+              personalNumber: r.licencePersonalNumberMatch,
+              surname: r.licenceSurnameMatch,
+              givenNames: r.licenceGivenNamesMatch,
+              birthDate: r.licenceBirthDateMatch,
+            },
+          },
     checks: r.checks,
     issues: r.issueCodes,
   };

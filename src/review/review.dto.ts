@@ -24,3 +24,40 @@ export class DecisionDto {
   @MaxLength(500)
   reason?: string;
 }
+
+export class TwoFactorChallengeDto {
+  @IsString()
+  @MinLength(20)
+  @MaxLength(200)
+  challenge: string;
+
+  /** A six-digit code from the authenticator app, or a recovery code. */
+  @IsString()
+  @MinLength(6)
+  @MaxLength(32)
+  code: string;
+}
+
+export class PasswordDto {
+  @IsString()
+  @MaxLength(256)
+  password: string;
+}
+
+export class EnableTwoFactorDto {
+  @IsString()
+  @MinLength(6)
+  @MaxLength(12)
+  code: string;
+}
+
+export class PasswordAndCodeDto {
+  @IsString()
+  @MaxLength(256)
+  password: string;
+
+  @IsString()
+  @MinLength(6)
+  @MaxLength(32)
+  code: string;
+}

@@ -16,13 +16,29 @@ Anything the pipeline does not approve automatically waits in a queue for a pers
 - Every failure (unknown email, wrong password, disabled or locked account) returns the same `401 Invalid email or password`, and a password hash is always computed, so neither the message nor the timing reveals which accounts exist.
 - Rate limits: `LOGIN_RATE_LIMIT` attempts per minute per IP (default 10), plus an account lock of 15 minutes after 5 consecutive failures. Behind a reverse proxy, enable Express `trust proxy` so the limit sees the real client IP.
 - State-changing requests (and login) must come from our own origin: a request with a foreign `Origin` header is refused with 403, on top of `SameSite=Strict`.
-- Optional TOTP second factor is planned: add a secret column and a second step after the password check in `ReviewAuthService.login`; nothing else needs to change.
+- **Two-factor sign-in** (below) is optional per reviewer and can be required per tenant.
+
+## Two-factor sign-in
+
+Reviewers can add a code from an authenticator app (Google Authenticator, Authy, 1Password and the like: time-based, six digits, 30 seconds) to their sign-in, so a phished or reused password is no longer enough to open customers' ID photos.
+
+- **Setting it up** (Security button in the header): enter your password, add the setup key to your app, confirm with a code. The service then shows **ten single-use recovery codes, once**. Turning it on signs out every other browser of that reviewer.
+- **Signing in** is two steps: the password gives a **challenge** (five minutes, a handful of guesses, grants nothing, no cookie), then a code or a recovery code opens the session. Every failure gives the same message. A code is accepted for the current 30-second step and one either side (clock drift), **once**: a code that was already used, or an earlier one, is refused, even in parallel requests.
+- **Lockout** counts both steps: five wrong passwords or codes lock the account for 15 minutes.
+- **Required per tenant**: `pnpm tenant:update <id> --require-reviewer-2fa` (and `--no-require-reviewer-2fa`). A reviewer without it can still sign in but can only reach the setup screens (everything else answers `403` with `code: "two_factor_setup_required"`), and the rule applies at once to people already signed in. Where it is required it cannot be turned off.
+- **Changing it** (turning off, new recovery codes) needs the password **and** a current code or recovery code.
+- **Lost phone**: an operator runs `pnpm reviewer reset-2fa <email>`, which turns it off, deletes their recovery codes and ends their sessions; under a requirement they set it up again at the next sign-in.
+- **Storage**: the authenticator secret is sealed with the same key provider as the documents (KMS in production), bound to its reviewer, and never stored in the clear; recovery codes are stored as hashes. If the key service is down, sign-in answers `503` rather than "wrong code".
+- Not included: a QR code (the page shows the setup key and the `otpauth://` address to type or paste), hardware keys/passkeys, SMS codes.
 
 ## API (cookie authenticated, all scoped to the reviewer's tenant)
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/review/api/login`, `/review/api/logout` | Sign in / out |
+| `POST` | `/review/api/login` | Password step: a session cookie, or `{ twoFactorRequired, challenge }` when the reviewer has two-factor on |
+| `POST` | `/review/api/login/2fa` | `{ challenge, code }`: the second step (a code or a recovery code) |
+| `GET` / `POST` | `/review/api/2fa`, `/2fa/setup`, `/2fa/enable`, `/2fa/disable`, `/2fa/recovery-codes` | Status and management (setup and changes need the password; changes also a code) |
+| `POST` | `/review/api/logout` | Sign out |
 | `GET` | `/review/api/me` | Current reviewer |
 | `GET` | `/review/api/sessions?cursor=` | Sessions in `NEEDS_REVIEW`, oldest first, 25 per page |
 | `GET` | `/review/api/sessions/:id` | Expected data, document list, automated results |
