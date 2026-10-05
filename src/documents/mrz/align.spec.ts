@@ -146,6 +146,18 @@ describe('readKosovoMrz with lines of the wrong length', () => {
     }
     // the same on line 1
     expect(read([l1 + 'A99', l2, l3].join('\n'))?.result.ok).toBe(true);
+
+  it('writes the fixed characters of the layout when OCR gave a look-alike, without a warning about them', () => {
+    const [l1, l2, l3] = card();
+    for (const first of ['1', 'L']) {
+      const r = read([first + l1.slice(1), l2, l3].join('\n'))!;
+      expect(r.result.ok).toBe(true);
+      expect(r.result.data!.documentType).toBe('ID');
+      expect(r.result.issues.map((i) => i.code)).not.toContain('UNEXPECTED_DOCUMENT_TYPE');
+    }
+    // a different, non-look-alike character is not turned into an I
+    const x = read(['X' + l1.slice(1) + '<', l2, l3].join('\n'));
+    expect(x?.result.data?.documentType ?? 'X').not.toBe('ID');
   });
 
   it('still reads a clean card exactly as before, without calling it repaired', () => {

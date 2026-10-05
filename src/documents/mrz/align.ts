@@ -118,8 +118,12 @@ export function alignLine(raw: string, template: Slot[]): Alignment {
   while (i > 0 || j > 0) {
     const mv = move[i][j];
     if (mv === 'd') {
-      if (fit(raw[i - 1], template[j - 1]) > 0) edits++;
-      out.push(raw[i - 1]);
+      const f = fit(raw[i - 1], template[j - 1]);
+      if (f > 0) edits++;
+      const slot = template[j - 1];
+      // A fixed character of the layout (the I, and RKS) read as a look-alike is written as the
+      // real one. No check digit covers these positions, so this changes nothing that is verified.
+      out.push(slot.kind === 'lit' && f > 0 && f <= 0.4 ? slot.ch : raw[i - 1]);
       i--;
       j--;
     } else if (mv === 'x') {
