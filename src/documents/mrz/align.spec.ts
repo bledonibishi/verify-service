@@ -96,6 +96,33 @@ describe('readKosovoMrz with lines of the wrong length', () => {
     }
   });
 
+  it('skips a junk line between the MRZ lines, even a long one or a 12-character label', () => {
+    const [l1, l2, l3] = card();
+    for (const junk of ['DATEOFISSUE1', 'PERSONALNUMBERRESIDENCEADDRESS', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ']) {
+      const r = read([l1 + '<', junk, l2, l3.slice(0, 27)].join('\n'));
+      expect(r?.result.ok).toBe(true);
+      expect(covered(r!.result.data!)).toEqual(covered(original));
+      const r2 = read([l1 + '<', l2, junk, l3.slice(0, 27)].join('\n'));
+      expect(r2?.result.ok).toBe(true);
+    }
+  });
+
+  it('does not let a closer-fitting but damaged triple hide a valid one further down', () => {
+    const [l1, l2, l3] = card();
+    const tampered = l1.slice(0, 7) + (l1[7] === '9' ? '8' : '9') + l1.slice(8); // wrong document digit, fits the layout perfectly
+    // The damaged triple fits the layout exactly (cost 0); the valid one needs filler repairs
+    const text = [tampered, l2, l3, 'LABEL', l1 + '<<', l2, l3.slice(0, 25)].join('\n');
+    const r = read(text);
+    expect(r?.result.ok).toBe(true);
+    expect(covered(r!.result.data!)).toEqual(covered(original));
+  });
+
+  it('with only the damaged triple present, still reports it as not valid', () => {
+    const [l1, l2, l3] = card();
+    const tampered = l1.slice(0, 7) + (l1[7] === '9' ? '8' : '9') + l1.slice(8);
+    expect(read([tampered, l2, l3].join('\n'))?.result.ok ?? false).toBe(false);
+  });
+
   it('still reads a clean card exactly as before, without calling it repaired', () => {
     const r = read(card().join('\n'))!;
     expect(r.result.ok).toBe(true);

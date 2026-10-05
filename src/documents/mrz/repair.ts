@@ -1,4 +1,4 @@
-import { extractApproximateTd1 } from './align';
+import { approximateTd1Candidates } from './align';
 import { ParseOptions, Td1Result, parseTd1 } from './td1';
 
 /**
@@ -127,8 +127,9 @@ export function readKosovoMrz(ocrText: string, opts: ParseOptions = {}): Lenient
   const first = exact ? parseKosovoTd1(exact, opts) : null;
   if (first?.result.ok) return first;
 
-  const approx = extractApproximateTd1(ocrText);
-  if (approx) {
+  // Closest fit first, but the check digits decide: a damaged triple must not hide a valid one
+  let fallback: LenientResult | null = null;
+  for (const approx of approximateTd1Candidates(ocrText)) {
     const r = parseKosovoTd1(approx.lines, opts);
     // A `<` weighs the same as a `0` in a check digit, so a lost trailing zero would pass them.
     // A repaired read must therefore also have the exact shape of a Kosovo card's fields.
@@ -139,8 +140,8 @@ export function readKosovoMrz(ocrText: string, opts: ParseOptions = {}): Lenient
       }
       return { ...r, repaired: true };
     }
-    // Aligned but the check digits do not agree: report what we have rather than pretend
-    return first ?? r;
+    fallback ??= r;
   }
-  return first;
+  // Nothing passed: report the exact reader's result, else the closest candidate's, rather than pretend
+  return first ?? fallback;
 }

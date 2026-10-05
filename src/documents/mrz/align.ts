@@ -153,21 +153,45 @@ const MAX_TOTAL_COST = 5;
 const MIN_LEN = 20;
 const MAX_LEN = 42;
 
+/** How many lines after a candidate's first line may be skipped over, and how many candidates are kept. */
+const MAX_SPAN = 6;
+const MAX_CANDIDATES = 20;
+
 /**
- * Finds three consecutive lines in OCR text that fit the Kosovo TD1 layout once their lengths are
- * repaired, skipping short junk lines (field labels, specks) between or around them.
+ * Every way of choosing three lines of the OCR text that fit the Kosovo TD1 layout once their
+ * lengths are repaired, closest fit first. Lines in between are skipped (field labels, specks,
+ * however long), within a window of a few lines. More than one is returned because the closest
+ * fit is not always the right one: the caller decides by the check digits, and a damaged triple
+ * must not hide a valid one further down.
  */
-export function extractApproximateTd1(ocrText: string): ApproximateTd1 | null {
-  const lines = ocrText.split(/\r?\n/).map(cleanMrzText).filter((l) => l.length >= 12);
-  let best: ApproximateTd1 | null = null;
+export function approximateTd1Candidates(ocrText: string): ApproximateTd1[] {
+  const lines = ocrText.split(/\r?\n/).map(cleanMrzText).filter((l) => l.length >= MIN_LEN && l.length <= MAX_LEN);
+  const aligned = new Map<string, Alignment>(); // line index + template, aligned once
+  const align = (i: number, k: number) => {
+    const key = `${i}:${k}`;
+    let a = aligned.get(key);
+    if (!a) aligned.set(key, (a = alignLine(lines[i], TEMPLATES[k])));
+    return a;
+  };
+  const found: ApproximateTd1[] = [];
   for (let i = 0; i < lines.length; i++) {
-    const triple = lines.slice(i, i + 3);
-    if (triple.length < 3 || triple.some((l) => l.length < MIN_LEN || l.length > MAX_LEN)) continue;
-    const aligned = triple.map((l, k) => alignLine(l, TEMPLATES[k]));
-    if (aligned.some((a) => a.cost > MAX_LINE_COST)) continue;
-    const cost = aligned.reduce((s, a) => s + a.cost, 0);
-    if (cost > MAX_TOTAL_COST) continue;
-    if (!best || cost < best.cost) best = { lines: aligned.map((a) => a.line), cost };
+    const first = align(i, 0);
+    if (first.cost > MAX_LINE_COST) continue;
+    for (let j = i + 1; j < Math.min(lines.length, i + MAX_SPAN); j++) {
+      const second = align(j, 1);
+      if (second.cost > MAX_LINE_COST || first.cost + second.cost > MAX_TOTAL_COST) continue;
+      for (let k = j + 1; k < Math.min(lines.length, i + MAX_SPAN); k++) {
+        const third = align(k, 2);
+        const cost = first.cost + second.cost + third.cost;
+        if (third.cost > MAX_LINE_COST || cost > MAX_TOTAL_COST) continue;
+        found.push({ lines: [first.line, second.line, third.line], cost });
+      }
+    }
   }
-  return best;
+  return found.sort((a, b) => a.cost - b.cost).slice(0, MAX_CANDIDATES);
+}
+
+/** The closest-fitting candidate, or null. See `approximateTd1Candidates`. */
+export function extractApproximateTd1(ocrText: string): ApproximateTd1 | null {
+  return approximateTd1Candidates(ocrText)[0] ?? null;
 }
