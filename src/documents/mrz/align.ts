@@ -47,7 +47,7 @@ function fit(c: string, slot: Slot): number {
   const isAlpha = /[A-Z]/.test(c);
   switch (slot.kind) {
     case 'lit':
-      return c === slot.ch ? 0 : TO_DIGIT[slot.ch] === c || TO_ALPHA[c] === slot.ch || (slot.ch === 'I' && /[1L]/.test(c)) ? 0.4 : 1.6;
+      return c === slot.ch ? 0 : TO_DIGIT[slot.ch] === c || TO_ALPHA[c] === slot.ch || (slot.ch === 'I' && /[1LT]/.test(c)) ? 0.4 : 1.6;
     case 'digit':
       return isDigit ? 0 : TO_DIGIT[c] ? 0.4 : 1.6;
     case 'alpha':

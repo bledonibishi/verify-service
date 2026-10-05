@@ -150,7 +150,7 @@ describe('readKosovoMrz with lines of the wrong length', () => {
 
   it('writes the fixed characters of the layout when OCR gave a look-alike, without a warning about them', () => {
     const [l1, l2, l3] = card();
-    for (const first of ['1', 'L']) {
+    for (const first of ['1', 'L', 'T']) {
       const r = read([first + l1.slice(1), l2, l3].join('\n'))!;
       expect(r.result.ok).toBe(true);
       expect(r.result.data!.documentType).toBe('ID');
