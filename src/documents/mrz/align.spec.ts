@@ -1,4 +1,4 @@
-import { alignLine, TEMPLATES, cleanMrzText } from './align';
+import { alignLine, TEMPLATES, cleanMrzText, trimJunkTail } from './align';
 import { parseTd1 } from './td1';
 import { readKosovoMrz } from './repair';
 import { buildTd1, SAMPLE, Td1Fields } from './testing';
@@ -53,6 +53,19 @@ describe('alignLine', () => {
 describe('cleanMrzText', () => {
   it('keeps only MRZ characters and normalises look-alike brackets and case', () => {
     expect(cleanMrzText('id rks 12.34-56 «‹ab')).toBe('IDRKS123456<<AB');
+  });
+});
+
+describe('trimJunkTail', () => {
+  it('drops a few stray characters after a run of fillers, and only then', () => {
+    expect(trimJunkTail('TESTI<<DEMA<<<<<<<<<<A99')).toBe('TESTI<<DEMA<<<<<<<<<<');
+    expect(trimJunkTail('TESTI<<DEMA<<<<X')).toBe('TESTI<<DEMA<<<<');
+    // names, separators and full-length lines are left alone
+    expect(trimJunkTail('TESTI<<DEMA')).toBe('TESTI<<DEMA');
+    expect(trimJunkTail('TESTI<<DEMA<<MARIA')).toBe('TESTI<<DEMA<<MARIA');
+    expect(trimJunkTail('ABCDEFGHIJKLMNOPQRSTUVWXYZ1234')).toBe('ABCDEFGHIJKLMNOPQRSTUVWXYZ1234');
+    // a longer tail is not a speck
+    expect(trimJunkTail('TESTI<<DEMA<<<<ABCDEF')).toBe('TESTI<<DEMA<<<<ABCDEF');
   });
 });
 
@@ -121,6 +134,18 @@ describe('readKosovoMrz with lines of the wrong length', () => {
     const [l1, l2, l3] = card();
     const tampered = l1.slice(0, 7) + (l1[7] === '9' ? '8' : '9') + l1.slice(8);
     expect(read([tampered, l2, l3].join('\n'))?.result.ok ?? false).toBe(false);
+  });
+
+  it('reads a card whose name line ends in stray characters after the fillers', () => {
+    const [l1, l2, l3] = card();
+    for (const tail of ['A99', 'X', '12', 'AB9']) {
+      const r = read([l1, l2, l3.slice(0, 25) + tail].join('\n'));
+      expect(r?.result.ok).toBe(true);
+      expect(covered(r!.result.data!)).toEqual(covered(original));
+      expect(r!.result.data).toMatchObject({ surname: 'TESTI', givenNames: 'DEMA' });
+    }
+    // the same on line 1
+    expect(read([l1 + 'A99', l2, l3].join('\n'))?.result.ok).toBe(true);
   });
 
   it('still reads a clean card exactly as before, without calling it repaired', () => {

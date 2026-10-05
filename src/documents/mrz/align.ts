@@ -134,6 +134,16 @@ export function alignLine(raw: string, template: Slot[]): Alignment {
   return { line: out.reverse().join(''), cost: Math.round(dp[n][m] * 1000) / 1000, edits };
 }
 
+/**
+ * Specks and edges after the end of a line come back as a few stray characters after the run of
+ * `<` fillers (`NAME<<GIVEN<<<<<<<<A99`). On the two lines that end in fillers, a short tail of
+ * letters or digits after three or more `<` is dropped. Nothing real can follow such a run, so
+ * this never touches a name or a number, and the check digits still decide the rest.
+ */
+export function trimJunkTail(line: string): string {
+  return line.replace(/(<{3,})[A-Z0-9]{1,4}$/, '$1');
+}
+
 /** Keeps only the characters an MRZ can contain; marks and spaces OCR invents are dropped. */
 export function cleanMrzText(line: string): string {
   return line
@@ -165,12 +175,16 @@ const MAX_CANDIDATES = 20;
  * must not hide a valid one further down.
  */
 export function approximateTd1Candidates(ocrText: string): ApproximateTd1[] {
-  const lines = ocrText.split(/\r?\n/).map(cleanMrzText).filter((l) => l.length >= MIN_LEN && l.length <= MAX_LEN);
+  const cleaned = ocrText.split(/\r?\n/).map(cleanMrzText);
+  // A line is tried both as it is and without a junk tail, since the tail can only help lines 1 and 3
+  const lines = cleaned.filter((l) => l.length >= MIN_LEN && l.length <= MAX_LEN);
+  const trimmed = lines.map(trimJunkTail);
   const aligned = new Map<string, Alignment>(); // line index + template, aligned once
   const align = (i: number, k: number) => {
     const key = `${i}:${k}`;
     let a = aligned.get(key);
-    if (!a) aligned.set(key, (a = alignLine(lines[i], TEMPLATES[k])));
+    // Lines 1 and 3 end in fillers, so junk after them can be dropped; line 2 ends in a digit
+    if (!a) aligned.set(key, (a = alignLine(k === 1 ? lines[i] : trimmed[i], TEMPLATES[k])));
     return a;
   };
   const found: ApproximateTd1[] = [];
