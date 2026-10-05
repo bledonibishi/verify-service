@@ -7,6 +7,11 @@ export interface OcrProvider {
 
 export interface OcrOptions {
   mode?: 'mrz' | 'text';
+  /**
+   * MRZ mode only: tells the engine whether a reading is good enough. If the image as given is not
+   * accepted, cleaned-up versions of it are tried until one is. Without it the image is read once.
+   */
+  accept?: (text: string) => boolean;
 }
 
 export interface OcrResult {

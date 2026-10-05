@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { mrzVariants } from './mrz-image';
 import { OcrError, OcrOptions, OcrProvider, OcrResult, OcrUnavailableError } from './ocr-provider';
 
 /**
@@ -17,14 +18,32 @@ export class TesseractProvider implements OcrProvider {
     private readonly textLang = 'eng',
   ) {}
 
-  readText(image: Buffer, options: OcrOptions = {}): Promise<OcrResult> {
+  async readText(image: Buffer, options: OcrOptions = {}): Promise<OcrResult> {
+    // The MRZ alphabet whitelist would destroy a licence (lower case, ë, punctuation), so printed
+    // text is read without one.
+    if (options.mode === 'text') return this.run(image, ['stdin', 'stdout', '-l', this.textLang, '--psm', '4']);
+    const args = ['stdin', 'stdout', '-l', this.lang, '--psm', '6', '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<'];
+    const first = await this.run(image, args);
+    if (!options.accept || options.accept(first.text)) return first;
+
+    // The photo as given did not read. Try cleaned-up versions, within a time budget, and fall
+    // back to the first reading (which the caller will report as unreadable) if none works.
+    const deadline = Date.now() + this.timeoutMs * 3;
+    for await (const variant of mrzVariants(image)) {
+      if (Date.now() > deadline) break;
+      try {
+        const next = await this.run(variant, args);
+        if (options.accept(next.text)) return next;
+      } catch (err) {
+        if (err instanceof OcrUnavailableError) throw err;
+        break; // a hung or failing engine: stop here rather than stack up more waits
+      }
+    }
+    return first;
+  }
+
+  private run(image: Buffer, args: string[]): Promise<OcrResult> {
     return new Promise((resolve, reject) => {
-      // The MRZ alphabet whitelist would destroy a licence (lower case, ë, punctuation), so printed
-      // text is read without one.
-      const args =
-        options.mode === 'text'
-          ? ['stdin', 'stdout', '-l', this.textLang, '--psm', '4']
-          : ['stdin', 'stdout', '-l', this.lang, '--psm', '6', '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<'];
       const child = spawn(this.binary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
       const chunks: Buffer[] = [];
       let size = 0;

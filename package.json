@@ -40,7 +40,8 @@
     "class-validator": "^0.15.1",
     "multer": "^2.4.0",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.2"
+    "rxjs": "^7.8.2",
+    "sharp": "^0.35.5"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.4.9",

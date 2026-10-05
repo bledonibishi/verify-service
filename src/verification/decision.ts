@@ -53,6 +53,11 @@ const MISMATCH_CODE: Record<keyof IdentityComparison, string> = {
   birthDate: 'BIRTH_DATE_MISMATCH',
 };
 
+/** True when the OCR text holds an MRZ whose check digits all pass; used to decide whether to try harder on the image. */
+export function mrzReadable(ocrText: string, now = new Date()): boolean {
+  return readKosovoMrz(ocrText, { now })?.result.ok === true;
+}
+
 /** Turns OCR text from the ID back into check results. */
 export function checkIdBack(ocrText: string, expected: ExpectedIdentity, now = new Date()): CheckOutcome {
   return readIdBack(ocrText, expected, now).outcome;

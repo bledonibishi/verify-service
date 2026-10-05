@@ -41,6 +41,12 @@ Tesseract reads the characters of an MRZ well but miscounts runs of `<`, so a li
 
 Known limit, shared with the exact reader: check digits cannot catch every error (a letter and a digit can weigh the same, e.g. `R` read as `7`).
 
+### Photos Tesseract cannot read as given (`src/ocr/mrz-image.ts`)
+
+On a real photo (grey print, a security pattern, uneven light) Tesseract often keeps the large `<` fillers and loses the letters and digits. When the image as uploaded does not give an MRZ whose check digits pass, the OCR step now tries cleaned-up versions of it, one at a time, and stops at the first that does: the bottom of the photo (35%, 50%, 25%, then all of it; a tight MRZ crop is used whole), enlarged to about 2200 px wide, contrast-equalised (CLAHE), and either left grey or hard-thresholded at two levels. At most 12 variants and three times the OCR timeout are spent per photo; a photo that reads on the first try costs nothing extra. Uses the `sharp` library (prebuilt binaries, no system install), in memory only. Photos over 60 megapixels or that are not images get no variants.
+
+Limits: it finds the MRZ by cutting the bottom of the photo, not by detecting it, so a photo where the card sits in the middle of a large background may still fail; the next step would be locating the `<` runs first. Install the `ocrb` language data for better accuracy still.
+
 ## Driving licence
 
 - **No MRZ**, so there are no check digits. Verification relies on reading the printed fields and cross-checking them against the ID.

@@ -1,4 +1,5 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import sharp from 'sharp';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { OcrUnavailableError } from './ocr-provider';
@@ -55,5 +56,52 @@ describe('TesseractProvider modes', () => {
     const text = (await p.readText(Buffer.from('x'), { mode: 'text' })).text;
     expect(text).not.toContain('whitelist');
     expect(text).toContain('-l eng+sqi');
+  });
+});
+
+describe('TesseractProvider tries cleaned-up images only when asked and only when needed', () => {
+  const dir3 = mkdtempSync(join(tmpdir(), 'tess-variants-'));
+  afterAll(() => rmSync(dir3, { recursive: true, force: true }));
+  // Answers BAD for its first `n` runs, then GOOD, and counts runs in a file
+  const flaky = (n: number) => {
+    const counter = join(dir3, `count-${n}`);
+    writeFileSync(counter, '');
+    const file = join(dir3, `flaky-${n}`);
+    writeFileSync(file, `#!/bin/sh\ncat >/dev/null\necho x >> "${counter}"\nif [ $(wc -l < "${counter}") -le ${n} ]; then echo BAD; else echo GOOD; fi\n`);
+    chmodSync(file, 0o755);
+    return { bin: file, runs: () => readFileSync(counter, 'utf8').split('\n').filter(Boolean).length };
+  };
+  const photo = () => sharp({ create: { width: 800, height: 600, channels: 3, background: '#cccccc' } }).png().toBuffer();
+
+  it('reads once when no judge is given', async () => {
+    const f = flaky(5);
+    expect((await new TesseractProvider(f.bin).readText(await photo())).text).toBe('BAD\n');
+    expect(f.runs()).toBe(1);
+  });
+
+  it('reads once when the first reading is accepted', async () => {
+    const f = flaky(0);
+    await new TesseractProvider(f.bin).readText(await photo(), { accept: (t) => t.includes('GOOD') });
+    expect(f.runs()).toBe(1);
+  });
+
+  it('moves on to cleaned-up images and stops at the first accepted one', async () => {
+    const f = flaky(3);
+    const r = await new TesseractProvider(f.bin).readText(await photo(), { accept: (t) => t.includes('GOOD') });
+    expect(r.text).toBe('GOOD\n');
+    expect(f.runs()).toBe(4);
+  });
+
+  it('gives back the first reading when nothing is accepted, after a bounded number of tries', async () => {
+    const f = flaky(1000);
+    const r = await new TesseractProvider(f.bin).readText(await photo(), { accept: () => false });
+    expect(r.text).toBe('BAD\n');
+    expect(f.runs()).toBeLessThanOrEqual(13);
+  });
+
+  it('never applies to printed text (licences)', async () => {
+    const f = flaky(5);
+    await new TesseractProvider(f.bin).readText(await photo(), { mode: 'text', accept: () => false });
+    expect(f.runs()).toBe(1);
   });
 });
