@@ -15,3 +15,4 @@ fixtures/private/
 *.private.*
 
 /sdk/dist/
+liveness-dist/
