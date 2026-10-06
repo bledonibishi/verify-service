@@ -1,6 +1,8 @@
 // Loaded before every test file (see jest.config.js). Tests must never reach real services, whatever
 // a developer has in their own .env: that file is full of real AWS settings and keys.
 //
+import { testDatabaseUrl } from './test-database';
+
 // Variables are set to '' rather than deleted on purpose: Prisma loads .env on start-up and fills in
 // anything that is *undefined*, which would bring the real values back.
 for (const name of [
@@ -19,6 +21,9 @@ for (const name of [
   'KMS_ACCESS_KEY_ID',
   'KMS_SECRET_ACCESS_KEY',
   'KMS_REGION',
+  'LIVENESS_ACCESS_KEY_ID',
+  'LIVENESS_SECRET_ACCESS_KEY',
+  'LIVENESS_BROWSER_ROLE_ARN',
 ]) {
   process.env[name] = '';
 }
@@ -28,3 +33,5 @@ process.env.FACE_PROVIDER = 'none';
 process.env.LIVENESS_PROVIDER = 'none';
 process.env.OCR_PROVIDER = 'tesseract';
 process.env.S3_REGION = 'eu-central-1';
+// Their own database, never the development one (see test-database.ts)
+process.env.DATABASE_URL = testDatabaseUrl();

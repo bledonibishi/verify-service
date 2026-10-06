@@ -148,5 +148,7 @@ Each tenant has its own retention windows: documents are deleted 30 days after t
 
 ```bash
 pnpm typecheck && pnpm build
-DATABASE_URL=postgresql://verify:verify@localhost:5434/verify pnpm test   # includes an e2e flow against Postgres
+pnpm test   # includes an e2e flow against Postgres, in its own database (see below)
 ```
+
+The tests use their own database, `verify_test` on the same local Postgres (created and migrated automatically), never the development database from `.env`: the end-to-end tests create and delete rows, and a copy of the service running on the development database would otherwise pick up their jobs and webhooks. Set `TEST_DATABASE_URL` to use another one; in CI (`CI=true`) the workflow's `DATABASE_URL` is used. The tests refuse to start if the test database is the one in `.env`.
