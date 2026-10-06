@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, GoneException, Inject, Injectable, NotImplementedException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, GoneException, HttpException, Inject, Injectable, NotImplementedException, NotFoundException } from '@nestjs/common';
 import { DocumentKind, SessionStatus } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import { sha256 } from '../common/crypto';
@@ -9,6 +9,9 @@ import { VerificationWorker } from '../verification/verification.worker';
 import { detectImageType } from './image-type';
 
 /** A 410 with a machine-readable reason, so a client can tell "already submitted" from "expired". */
+/** Face checks one link may start: enough for a few honest retries, not for an endless loop. */
+export const MAX_LIVENESS_STARTS = 5;
+
 const gone = (message: string, code: 'session_submitted' | 'session_expired' | 'session_closed') =>
   new GoneException({ statusCode: 410, error: 'Gone', message, code });
 
@@ -75,6 +78,17 @@ export class UploadsService {
    */
   async startLiveness(token: string) {
     const session = await this.openSession(token);
+    // A link may start only a few challenges: each one creates a session at the provider, and a
+    // repeated or scripted start would otherwise create them without end. Reserved before the call.
+    const reserved = await this.prisma.session.updateMany({
+      where: { id: session.id, status: SessionStatus.PENDING, expiresAt: { gt: new Date() }, livenessStarts: { lt: MAX_LIVENESS_STARTS } },
+      data: { livenessStarts: { increment: 1 } },
+    });
+    if (reserved.count === 0) {
+      const now = await this.prisma.session.findUnique({ where: { id: session.id } });
+      if (!now || now.status !== SessionStatus.PENDING || now.expiresAt.getTime() <= Date.now()) throw gone('Session is closed', 'session_closed');
+      throw new HttpException({ statusCode: 429, message: 'Too many face checks were started for this link', code: 'liveness_attempts_exceeded' }, 429);
+    }
     let created;
     try {
       created = await this.liveness.createSession();

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Controller,
   Get,
+  Header,
   HttpCode,
   Param,
   ParseEnumPipe,
@@ -34,6 +35,8 @@ export class UploadsController {
 
   @Post('liveness')
   @HttpCode(200)
+  // The reply can carry short-lived credentials for this one browser: never cached
+  @Header('Cache-Control', 'no-store')
   startLiveness(@Param('token') token: string) {
     return this.uploads.startLiveness(token);
   }
