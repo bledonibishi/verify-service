@@ -33,6 +33,8 @@ interface Options {
   storedToken?: string;
   /** Extra sessionStorage entries before the page runs. */
   storage?: Record<string, string>;
+  /** The browser refuses to store anything (some private modes). */
+  blockStorage?: boolean;
 }
 
 function boot(o: Options = {}) {
@@ -71,6 +73,7 @@ function boot(o: Options = {}) {
   if (o.language) Object.defineProperty(w.navigator, 'languages', { value: [o.language], configurable: true });
   if (o.storedToken) w.sessionStorage.setItem('verify-token', o.storedToken);
   for (const [k, v] of Object.entries(o.storage ?? {})) w.sessionStorage.setItem(k, v);
+  if (o.blockStorage) w.Storage.prototype.setItem = () => { throw new w.DOMException('blocked', 'SecurityError'); };
   w.eval(VERIFY_JS);
   return { dom, w, calls, canvas, doc: w.document as Document };
 }
@@ -500,9 +503,8 @@ describe('hosted page with a liveness provider', () => {
 
   it('back from a completed face check, continues to the review with the check marked done', async () => {
     const env = boot({
-      url: 'http://verify.test/verify?lang=en',
+      url: 'http://verify.test/verify?lang=en&liveness=done',
       storedToken: TOKEN,
-      storage: { 'verify-liveness-done': TOKEN, 'verify-resume': TOKEN },
       session: ok({ ...LIVE, livenessStarted: true, uploaded: ['ID_FRONT', 'ID_BACK'] }),
     });
     await flush();
@@ -510,16 +512,56 @@ describe('hosted page with a liveness provider', () => {
     expect(text(env.doc)).toContain('Face check');
     expect(text(env.doc)).toContain('✓');
     expect(button(env.doc, 'Submit for verification')!.disabled).toBe(false);
-    expect(env.w.sessionStorage.getItem('verify-resume')).toBeNull();
+    expect(env.w.location.search).toBe('?lang=en'); // the outcome is taken out of the address
+    expect(env.w.sessionStorage.getItem('verify-liveness-done')).toBe(TOKEN); // and kept for a reload
   });
 
   it('does not count a face check as done unless the service has one on record, for this link', async () => {
-    const noRecord = boot({ storedToken: TOKEN, url: 'http://verify.test/verify', storage: { 'verify-liveness-done': TOKEN, 'verify-resume': TOKEN }, session: ok({ ...LIVE, uploaded: ['ID_FRONT', 'ID_BACK'] }) });
+    const noRecord = boot({ storedToken: TOKEN, url: 'http://verify.test/verify?liveness=done', session: ok({ ...LIVE, uploaded: ['ID_FRONT', 'ID_BACK'] }) });
     await flush();
     expect(h1(noRecord.doc)).toBe('Face check');
-    const otherLink = boot({ storedToken: TOKEN, url: 'http://verify.test/verify', storage: { 'verify-liveness-done': 'some-other-token-0123456789', 'verify-resume': TOKEN }, session: ok({ ...LIVE, livenessStarted: true, uploaded: ['ID_FRONT', 'ID_BACK'] }) });
+    const otherLink = boot({ storedToken: TOKEN, url: 'http://verify.test/verify', storage: { 'verify-liveness-done': 'some-other-token-0123456789' }, session: ok({ ...LIVE, livenessStarted: true, uploaded: ['ID_FRONT', 'ID_BACK'] }) });
     await flush();
+    await start(otherLink);
     expect(h1(otherLink.doc)).toBe('Face check');
+  });
+
+  it('coming back from the face check does not reopen an optional photo the person skipped', async () => {
+    const back = (outcome: string, livenessStarted: boolean) =>
+      boot({ storedToken: TOKEN, url: `http://verify.test/verify?lang=en&liveness=${outcome}`, session: ok({ ...LIVE, livenessStarted, uploaded: ['ID_FRONT'] }) });
+    const done = back('done', true);
+    await flush();
+    expect(h1(done.doc)).toBe('Almost done'); // not "Back of your identity card"
+    const cancelled = back('cancelled', true);
+    await flush();
+    expect(h1(cancelled.doc)).toBe('Face check'); // the face check is required and still open
+  });
+
+  it('coming back with "selfie instead" goes straight to the selfie step', async () => {
+    const env = boot({ storedToken: TOKEN, url: 'http://verify.test/verify?lang=en&liveness=selfie', session: ok({ ...LIVE, uploaded: ['ID_FRONT', 'ID_BACK'] }) });
+    await flush();
+    expect(h1(env.doc)).toBe('A selfie');
+    expect(env.w.sessionStorage.getItem('verify-selfie-instead')).toBe(TOKEN);
+  });
+
+  it('when the browser blocks storage, the token goes to the face check page in the fragment only', async () => {
+    const env = boot({ session: ok(LIVE), blockStorage: true });
+    await throughDocuments(env);
+    const href = (env.doc.querySelector('a.btn.primary') as HTMLAnchorElement).getAttribute('href')!;
+    expect(href).toBe(`/verify/liveness?lang=en#${TOKEN}`);
+    expect(href.split('#')[0]).not.toContain(TOKEN); // never in the part that reaches a server
+    // and the normal case keeps it out of the link entirely
+    const normal = boot({ session: ok(LIVE) });
+    await throughDocuments(normal);
+    expect((normal.doc.querySelector('a.btn.primary') as HTMLAnchorElement).getAttribute('href')).toBe('/verify/liveness?lang=en');
+  });
+
+  it('when storage is blocked, a face check the service has on record counts after the return trip', async () => {
+    const env = boot({ url: `http://verify.test/verify?lang=en&liveness=done#${TOKEN}`, blockStorage: true, session: ok({ ...LIVE, livenessStarted: true, uploaded: ['ID_FRONT', 'ID_BACK'] }) });
+    await flush();
+    expect(env.calls[0].url).toBe(`/v1/upload/${TOKEN}`);
+    expect(h1(env.doc)).toBe('Almost done');
+    expect(env.w.location.hash).toBe('');
   });
 
   it('without a liveness provider, nothing changes: a plain selfie step', async () => {
@@ -541,12 +583,9 @@ describe('hosted page with a liveness provider', () => {
  * The face check page's loader, with a stand-in for the AWS widget: it records what the page gives
  * it and lets the test play the widget's outcome. No camera, no AWS.
  */
-function bootLiveness(o: { token?: string | null; widget?: boolean; replies?: Reply[]; lang?: string } = {}) {
-  const { VirtualConsole } = require('jsdom');
+function bootLiveness(o: { token?: string | null; widget?: boolean; replies?: Reply[]; lang?: string; hashToken?: boolean; blockStorage?: boolean } = {}) {
   const navigations: string[] = [];
-  const vc = new VirtualConsole();
-  vc.on('jsdomError', (e: Error) => { if (/navigation/i.test(e.message)) navigations.push('navigated'); });
-  const dom = new JSDOM(LIVENESS_HTML, { url: `http://verify.test/verify/liveness?lang=${o.lang ?? 'en'}`, runScripts: 'outside-only', virtualConsole: vc });
+  const dom = new JSDOM(LIVENESS_HTML, { url: `http://verify.test/verify/liveness?lang=${o.lang ?? 'en'}${o.hashToken ? `#${TOKEN}` : ''}`, runScripts: 'outside-only' });
   const w = dom.window as any;
   const calls: Call[] = [];
   const replies = [...(o.replies ?? [ok({ provider: 'aws', sessionId: 'aws-session-1', region: 'eu-west-1', credentials: { accessKeyId: 'ASIA', secretAccessKey: 'S3CR3T', sessionToken: 'T0K3N' } })])];
@@ -556,11 +595,14 @@ function bootLiveness(o: { token?: string | null; widget?: boolean; replies?: Re
     if (r instanceof Error) throw r;
     return { status: r.status, json: async () => r.json ?? {} };
   };
-  if (o.token !== null) w.sessionStorage.setItem('verify-token', o.token ?? TOKEN);
+  if (o.token !== null && !o.hashToken) w.sessionStorage.setItem('verify-token', o.token ?? TOKEN);
+  if (o.blockStorage) w.Storage.prototype.setItem = () => { throw new w.DOMException('blocked', 'SecurityError'); };
+  // jsdom cannot navigate: record where the page sends the browser instead (test-only rewrite)
+  w.__nav = (url: string) => navigations.push(url);
   const mounts: any[] = [];
   let unmounted = 0;
   if (o.widget !== false) w.VerifyLiveness = { mount: (_el: unknown, opts: any) => { mounts.push(opts); return () => { unmounted++; }; } };
-  w.eval(LIVENESS_JS);
+  w.eval(LIVENESS_JS.replace(/location\.replace\(/g, 'window.__nav('));
   return { w, doc: w.document as Document, calls, mounts, navigations, unmounted: () => unmounted };
 }
 
@@ -578,22 +620,37 @@ describe('face check page', () => {
     expect(storage).not.toContain('T0K3N');
   });
 
-  it('on success, marks the check done for this link and goes back to the capture page', async () => {
+  it('on success, goes back to the capture page saying so, with no token in the address', async () => {
     const env = bootLiveness();
     await flush();
     env.mounts[0].onComplete();
-    expect(env.w.sessionStorage.getItem('verify-liveness-done')).toBe(TOKEN);
-    expect(env.w.sessionStorage.getItem('verify-resume')).toBe(TOKEN);
-    expect(env.navigations.length).toBeGreaterThan(0);
+    expect(env.navigations).toEqual(['/verify?lang=en&liveness=done']);
     expect(env.unmounted()).toBe(1);
   });
 
-  it('on cancel, goes back without marking anything done', async () => {
+  it('on cancel, goes back saying so', async () => {
     const env = bootLiveness();
     await flush();
     env.mounts[0].onCancel();
-    expect(env.w.sessionStorage.getItem('verify-liveness-done')).toBeNull();
-    expect(env.navigations.length).toBeGreaterThan(0);
+    expect(env.navigations).toEqual(['/verify?lang=en&liveness=cancelled']);
+  });
+
+  it('when storage is blocked, takes the token from the fragment, removes it, and carries it back the same way', async () => {
+    const env = bootLiveness({ hashToken: true, blockStorage: true });
+    await flush();
+    expect(env.calls[0].url).toBe(`/v1/upload/${TOKEN}/liveness`);
+    expect(env.w.location.hash).toBe('');
+    env.mounts[0].onComplete();
+    expect(env.navigations).toEqual([`/verify?lang=en&liveness=done#${TOKEN}`]);
+  });
+
+  it('after too many starts on one link, offers the selfie (no pointless retry)', async () => {
+    const env = bootLiveness({ replies: [{ status: 429, json: { code: 'liveness_attempts_exceeded' } }] });
+    await flush();
+    expect(text(env.doc)).toContain('too many times');
+    expect(button(env.doc, 'Try again')).toBeUndefined();
+    button(env.doc, 'Send a selfie instead')!.click();
+    expect(env.navigations).toEqual(['/verify?lang=en&liveness=selfie']);
   });
 
   it('on a widget error, offers a new try (a fresh challenge) or a selfie instead', async () => {
@@ -608,8 +665,7 @@ describe('face check page', () => {
     expect(env.mounts).toHaveLength(2);
     env.mounts[1].onError('TIMEOUT');
     button(env.doc, 'Send a selfie instead')!.click();
-    expect(env.w.sessionStorage.getItem('verify-selfie-instead')).toBe(TOKEN);
-    expect(env.navigations.length).toBeGreaterThan(0);
+    expect(env.navigations).toEqual(['/verify?lang=en&liveness=selfie']);
   });
 
   it('explains instead of breaking when the service has no face check, or the link is closed or unknown', async () => {

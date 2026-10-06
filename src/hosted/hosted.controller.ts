@@ -26,7 +26,7 @@ const livenessPolicy = (region: string) =>
  */
 @Controller('verify')
 export class HostedController {
-  private readonly widget = new Map<string, Buffer | null>();
+  private readonly widget = new Map<string, Buffer>();
 
   constructor(private readonly config: ConfigService) {}
 
@@ -58,20 +58,22 @@ export class HostedController {
     return /^[a-z]{2}(-[a-z]+)+-\d$/.test(r) ? r : 'eu-west-1';
   }
 
-  /** The built widget (pnpm build:liveness). Read once; missing files answer 404 and the page offers the selfie instead. */
+  /**
+   * The built widget (pnpm build / build:liveness). Kept in memory once found; a missing file is
+   * looked for again on the next request, so building the widget after the service started works
+   * without a restart. Missing files answer 404 and the face check page offers the selfie instead.
+   */
   private widgetFile(name: string): Buffer {
-    if (!this.widget.has(name)) {
-      const dir = resolve(this.config.get<string>('LIVENESS_WIDGET_DIR') || 'liveness-dist');
-      let data: Buffer | null = null;
-      try {
-        data = readFileSync(join(dir, name));
-      } catch {
-        data = null;
-      }
-      this.widget.set(name, data);
+    const path = join(resolve(this.config.get<string>('LIVENESS_WIDGET_DIR') || 'liveness-dist'), name);
+    const cached = this.widget.get(path);
+    if (cached) return cached;
+    let data: Buffer;
+    try {
+      data = readFileSync(path);
+    } catch {
+      throw new NotFoundException('The face check is not installed on this server');
     }
-    const data = this.widget.get(name);
-    if (!data) throw new NotFoundException('The face check is not installed on this server');
+    this.widget.set(path, data);
     return data;
   }
 

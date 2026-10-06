@@ -3666,6 +3666,9 @@ describe('verification flow (e2e)', () => {
         expect(js.headers['cache-control']).toBe('no-cache');
         expect(js.text).toContain('VerifyLiveness');
         await request(http()).get('/verify/liveness-widget.css').expect(404);
+        // built after the service started: found on the next request, no restart needed
+        writeFileSync(join(dir, 'liveness-widget.css'), '.amplify-liveness{}');
+        expect((await request(http()).get('/verify/liveness-widget.css').expect(200)).text).toContain('amplify-liveness');
       } finally {
         if (original === undefined) delete process.env.LIVENESS_WIDGET_DIR;
         else process.env.LIVENESS_WIDGET_DIR = original;

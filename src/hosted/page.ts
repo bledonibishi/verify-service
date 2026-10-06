@@ -358,7 +358,7 @@ export const VERIFY_JS = `
       el('p', { text: t('LIVENESS_HINT') }),
       state.uploaded.LIVENESS
         ? el('button', { class: 'primary', type: 'button', text: t('checkDone'), onclick: next })
-        : el('a', { class: 'btn primary', href: '/verify/liveness?lang=' + lang, text: t('startCheck') }),
+        : el('a', { class: 'btn primary', href: livenessLink(), text: t('startCheck') }),
       el('button', { type: 'button', text: t('selfieInstead'), onclick: function () { useSelfieInstead(); show(); } })
     ])]);
   }
@@ -381,6 +381,23 @@ export const VERIFY_JS = `
   }
 
   function stored(key) { try { return sessionStorage.getItem(key); } catch (e) { return null; } }
+
+  // Whether this tab can keep the token. Some browsers block storage (private modes, settings);
+  // then the token travels to the face check page in the URL fragment, which browsers never send
+  // to a server, exactly as it arrived in the link.
+  function storageWorks() {
+    try { sessionStorage.setItem('verify-probe', '1'); sessionStorage.removeItem('verify-probe'); return true; } catch (e) { return false; }
+  }
+  function livenessLink() {
+    return '/verify/liveness?lang=' + lang + (storageWorks() ? '' : '#' + state.token);
+  }
+
+  // The first required step still missing: coming back from the face check must not reopen an
+  // optional photo the person chose to skip
+  function firstRequiredOpen() {
+    for (var i = 0; i < state.steps.length; i++) if (state.steps[i].required && !state.uploaded[state.steps[i].kind]) return i;
+    return state.steps.length;
+  }
 
   function next() { state.index++; if (state.index >= state.steps.length) { state.screen = 'review'; } else { state.screen = 'step'; } show(); }
 
@@ -469,16 +486,21 @@ export const VERIFY_JS = `
       // Still failing after the retries: say so and let the user try again, instead of "link not found"
       if (r.status !== 200) return showFatal('trouble', 'network', load);
       state.liveness = !!r.data.liveness;
-      state.selfieInstead = state.liveness && stored('verify-selfie-instead') === state.token;
+      var back = /[?&]liveness=(done|cancelled|selfie)\\b/.exec(location.search);
+      if (back) history.replaceState(null, '', location.pathname + '?lang=' + lang);
+      if (back && back[1] === 'selfie') { try { sessionStorage.setItem('verify-selfie-instead', state.token); } catch (e) { /* ignore */ } }
+      if (back && back[1] === 'done') { try { sessionStorage.setItem('verify-liveness-done', state.token); } catch (e) { /* ignore */ } }
+      state.selfieInstead = state.liveness && ((back && back[1] === 'selfie') || stored('verify-selfie-instead') === state.token);
       state.steps = pageSteps(r.data.steps);
       state.uploaded = {};
       (r.data.uploaded || []).forEach(function (k) { state.uploaded[k] = true; });
-      // Done means: the challenge page reported completion for this token, and the service has a challenge on record
-      if (state.liveness && r.data.livenessStarted && stored('verify-liveness-done') === state.token) state.uploaded.LIVENESS = true;
+      // Done needs both: the face check page said so (now or earlier in this tab), and the service has a challenge on record
+      if (state.liveness && r.data.livenessStarted && ((back && back[1] === 'done') || stored('verify-liveness-done') === state.token)) state.uploaded.LIVENESS = true;
       // Back from the face check page: continue where the person was, not at the start
-      if (state.liveness && stored('verify-resume') === state.token) {
-        try { sessionStorage.removeItem('verify-resume'); } catch (e) { /* ignore */ }
-        return begin();
+      if (state.liveness && back) {
+        state.index = firstRequiredOpen();
+        state.screen = state.index >= state.steps.length ? 'review' : 'step';
+        return show();
       }
       state.screen = 'intro';
       show();
@@ -531,26 +553,42 @@ export const LIVENESS_JS = `
     en: { title: 'Face check', preparing: 'Preparing the face check…', unavailable: 'The face check could not start on this device.',
       closedTitle: 'This link cannot be used', closed: 'It has expired or was already used. Ask the company that sent it for a new link.',
       invalidTitle: 'Link not found', invalid: 'Open the link exactly as you received it, or ask for a new one.',
-      failed: 'The face check did not work this time.', retry: 'Try again', back: 'Back', selfie: 'Send a selfie instead' },
+      failed: 'The face check did not work this time.', retry: 'Try again', back: 'Back', selfie: 'Send a selfie instead',
+      tooMany: 'The face check was started too many times with this link. Send a selfie instead, or ask for a new link.' },
     sq: { title: 'Kontrolli i fytyrës', preparing: 'Po përgatitet kontrolli i fytyrës…', unavailable: 'Kontrolli i fytyrës nuk mund të fillojë në këtë pajisje.',
       closedTitle: 'Kjo lidhje nuk mund të përdoret', closed: 'Ka skaduar ose është përdorur tashmë. Kërkoni një lidhje të re nga kompania që ju e dërgoi.',
       invalidTitle: 'Lidhja nuk u gjet', invalid: 'Hapeni lidhjen saktësisht ashtu siç e morët, ose kërkoni një të re.',
-      failed: 'Kontrolli i fytyrës nuk funksionoi këtë herë.', retry: 'Provo përsëri', back: 'Kthehu', selfie: 'Dërgoni një selfi' },
+      failed: 'Kontrolli i fytyrës nuk funksionoi këtë herë.', retry: 'Provo përsëri', back: 'Kthehu', selfie: 'Dërgoni një selfi',
+      tooMany: 'Kontrolli i fytyrës u nis shumë herë me këtë lidhje. Dërgoni një selfi, ose kërkoni një lidhje të re.' },
     sr: { title: 'Provera lica', preparing: 'Priprema provere lica…', unavailable: 'Provera lica ne može da počne na ovom uređaju.',
       closedTitle: 'Ova veza se ne može koristiti', closed: 'Istekla je ili je već iskorišćena. Zatražite novu vezu od kompanije koja vam je poslala.',
       invalidTitle: 'Veza nije pronađena', invalid: 'Otvorite vezu tačno onako kako ste je dobili ili zatražite novu.',
-      failed: 'Provera lica ovaj put nije uspela.', retry: 'Pokušaj ponovo', back: 'Nazad', selfie: 'Pošaljite selfi' }
+      failed: 'Provera lica ovaj put nije uspela.', retry: 'Pokušaj ponovo', back: 'Nazad', selfie: 'Pošaljite selfi',
+      tooMany: 'Provera lica je pokrenuta previše puta sa ovom vezom. Pošaljite selfi ili zatražite novu vezu.' }
   };
 
   var app = document.getElementById('app');
   var widget = document.getElementById('widget');
   var lang = pickLanguage();
-  var token = stored('verify-token');
+  var token = readToken();
   var unmount = null;
 
   function t(key) { return (STRINGS[lang] && STRINGS[lang][key]) || STRINGS.en[key]; }
   function stored(key) { try { return sessionStorage.getItem(key); } catch (e) { return null; } }
-  function remember(key, value) { try { sessionStorage.setItem(key, value); } catch (e) { /* ignore */ } }
+
+  // From this tab's storage, or from the URL fragment when the browser blocks storage. Taken out of
+  // the address bar at once either way.
+  function readToken() {
+    var fromHash = location.hash.replace(/^#/, '');
+    if (/^[A-Za-z0-9_-]{20,120}$/.test(fromHash)) {
+      history.replaceState(null, '', location.pathname + location.search);
+      return fromHash;
+    }
+    return stored('verify-token');
+  }
+  function storageWorks() {
+    try { sessionStorage.setItem('verify-probe', '1'); sessionStorage.removeItem('verify-probe'); return true; } catch (e) { return false; }
+  }
 
   function pickLanguage() {
     var q = /[?&]lang=(en|sq|sr)\\b/.exec(location.search);
@@ -578,19 +616,19 @@ export const LIVENESS_JS = `
     app.appendChild(card);
   }
 
-  // Back to the capture page, which carries on from the next open step
-  function back(extra) {
+  // Back to the capture page, which carries on from the next required step. The outcome travels in
+  // the query (it holds no secret, and the service still decides from its own record); the token
+  // only in the fragment, and only when the tab cannot keep it.
+  function back(outcome) {
     if (unmount) { try { unmount(); } catch (e) { /* ignore */ } unmount = null; }
-    if (extra) remember(extra, token);
-    remember('verify-resume', token);
-    location.replace('/verify?lang=' + lang);
+    location.replace('/verify?lang=' + lang + '&liveness=' + outcome + (storageWorks() ? '' : '#' + token));
   }
 
   function choices() {
     return [
       el('button', { class: 'primary', type: 'button', text: t('retry'), onclick: start }),
-      el('button', { type: 'button', text: t('selfie'), onclick: function () { back('verify-selfie-instead'); } }),
-      el('button', { type: 'button', text: t('back'), onclick: function () { back(); } })
+      el('button', { type: 'button', text: t('selfie'), onclick: function () { back('selfie'); } }),
+      el('button', { type: 'button', text: t('back'), onclick: function () { back('cancelled'); } })
     ];
   }
 
@@ -605,6 +643,7 @@ export const LIVENESS_JS = `
     }).then(function (r) {
       if (r.status === 404) return message('invalidTitle', 'invalid');
       if (r.status === 410) return message('closedTitle', 'closed');
+      if (r.status === 429) return message('title', 'tooMany', choices().slice(1));
       if (r.status !== 200 || !r.data || !r.data.sessionId || !r.data.credentials) return message('title', 'unavailable', choices());
       while (app.firstChild) app.removeChild(app.firstChild);
       // The credentials live only inside this call: never stored, logged or put in the page
@@ -613,8 +652,8 @@ export const LIVENESS_JS = `
         region: r.data.region,
         credentials: r.data.credentials,
         lang: lang,
-        onComplete: function () { remember('verify-liveness-done', token); back(); },
-        onCancel: function () { back(); },
+        onComplete: function () { back('done'); },
+        onCancel: function () { back('cancelled'); },
         onError: function () {
           if (unmount) { try { unmount(); } catch (e) { /* ignore */ } unmount = null; }
           message('title', 'failed', choices());
