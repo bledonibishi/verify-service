@@ -14,7 +14,7 @@ Anything the pipeline does not approve automatically waits in a queue for a pers
 - `POST /review/api/login` sets a random session token in an `HttpOnly`, `SameSite=Strict`, `Path=/review` cookie (`Secure` when `PUBLIC_BASE_URL` is https). Only the token's SHA-256 is stored.
 - Sessions last at most 8 hours and expire after 60 minutes idle.
 - Every failure (unknown email, wrong password, disabled or locked account) returns the same `401 Invalid email or password`, and a password hash is always computed, so neither the message nor the timing reveals which accounts exist.
-- Rate limits: `LOGIN_RATE_LIMIT` attempts per minute per IP (default 10), plus an account lock of 15 minutes after 5 consecutive failures. Behind a reverse proxy, enable Express `trust proxy` so the limit sees the real client IP.
+- Rate limits: `LOGIN_RATE_LIMIT` attempts per minute per IP (default 10), plus an account lock of 15 minutes after 5 consecutive failures. Behind a reverse proxy, set `TRUST_PROXY=1` (the number of proxies, or `loopback`) so the limit sees the real client IP; without it every visitor shares the proxy's address.
 - State-changing requests (and login) must come from our own origin: a request with a foreign `Origin` header is refused with 403, on top of `SameSite=Strict`.
 - **Two-factor sign-in** (below) is optional per reviewer and can be required per tenant.
 

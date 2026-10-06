@@ -657,10 +657,35 @@ describe('verification flow (e2e)', () => {
         return { token: created.body.uploadToken as string, id: created.body.id as string };
       };
 
+      it('lets one link start only a few challenges, then answers 429 with a code the page understands', async () => {
+        const { token, id } = await startToken('live-limit');
+        for (let i = 0; i < 5; i++) await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
+        const res = await request(http()).post(`/v1/upload/${token}/liveness`).expect(429);
+        expect(res.body.code).toBe('liveness_attempts_exceeded');
+        expect((await prisma.session.findUnique({ where: { id } }))?.livenessStarts).toBe(5);
+        // another link is not affected
+        const other = await startToken('live-limit-other');
+        await request(http()).post(`/v1/upload/${other.token}/liveness`).expect(200);
+      });
+
+      it('counts a start that the provider could not serve, so a broken provider cannot be retried without end', async () => {
+        const { token, id } = await startToken('live-limit-broken');
+        const real = createImpl;
+        createImpl = async () => { throw new LivenessUnavailableError('refused'); }; // every start answers 501
+        try {
+          for (let i = 0; i < 5; i++) await request(http()).post(`/v1/upload/${token}/liveness`).expect(501);
+          await request(http()).post(`/v1/upload/${token}/liveness`).expect(429);
+          expect((await prisma.session.findUnique({ where: { id } }))?.livenessStarts).toBe(5);
+        } finally {
+          createImpl = real;
+        }
+      });
+
       it('starts a challenge, stores only the provider session id, and audit-logs it', async () => {
         const { token, id } = await startToken('live-start');
         const res = await request(http()).post(`/v1/upload/${token}/liveness`).expect(200);
         expect(res.body).toMatchObject({ provider: 'fake-live', sessionId: expect.stringMatching(/^live-/) });
+        expect(res.headers['cache-control']).toBe('no-store'); // the reply can carry short-lived credentials
         const row = await prisma.session.findUnique({ where: { id } });
         expect(row?.livenessSessionId).toBe(res.body.sessionId);
         expect((await prisma.auditLog.findMany({ where: { sessionId: id } })).map((l) => l.event)).toContain('liveness.started');
@@ -693,12 +718,13 @@ describe('verification flow (e2e)', () => {
           await new Promise((r) => setTimeout(r, 150));
           return { providerSessionId: `live-${++sessionCounter}` };
         };
+        // Four at once plus the later one below: five, the most one link may start
         const results = await Promise.all(
-          Array.from({ length: 5 }, () => request(http()).post(`/v1/upload/${token}/liveness`)),
+          Array.from({ length: 4 }, () => request(http()).post(`/v1/upload/${token}/liveness`)),
         );
         const winners = results.filter((r) => r.status === 200);
         expect(winners).toHaveLength(1);
-        expect(results.filter((r) => r.status === 409)).toHaveLength(4);
+        expect(results.filter((r) => r.status === 409)).toHaveLength(3);
         // The id the client was handed is the one that is stored
         expect((await prisma.session.findUnique({ where: { id } }))?.livenessSessionId).toBe(winners[0].body.sessionId);
         // A later, non-racing start replaces it
