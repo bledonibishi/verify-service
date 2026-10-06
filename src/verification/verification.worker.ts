@@ -229,15 +229,16 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     const front = documents.find((d) => d.kind === DocumentKind.ID_FRONT);
     const selfie = documents.find((d) => d.kind === DocumentKind.SELFIE);
     const source = referenceImage ? 'liveness' : 'selfie';
-    if (!front || !selfie) {
-      return { face: null, missing: [...(front ? [] : ['ID_FRONT_MISSING']), ...(selfie ? [] : ['SELFIE_MISSING'])], source };
+    // The liveness image stands in for a selfie: a session that did the challenge needs no upload
+    if (!front || (!selfie && !referenceImage)) {
+      return { face: null, missing: [...(front ? [] : ['ID_FRONT_MISSING']), ...(selfie || referenceImage ? [] : ['SELFIE_MISSING'])], source };
     }
     try {
       // The image captured during the liveness challenge wins over the uploaded selfie, so the
       // match is against the person who actually passed liveness.
       const [idImage, selfieImage] = await Promise.all([
         this.storage.get(front.storageKey),
-        referenceImage ?? this.storage.get(selfie.storageKey),
+        referenceImage ?? this.storage.get(selfie!.storageKey),
       ]);
       return { face: faceOutcome(await this.face.compare(idImage, selfieImage), threshold), missing: [], source };
     } catch (err) {

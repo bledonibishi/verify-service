@@ -60,7 +60,9 @@ export class UploadsService {
             { kind: DocumentKind.LICENCE_BACK, required: false },
           ]
         : []),
-      { kind: DocumentKind.SELFIE, required: true },
+      // With liveness, the face check replaces the selfie (its captured image is what the ID is
+      // compared with); a selfie stays possible as a fallback for a device that cannot run it
+      { kind: DocumentKind.SELFIE, required: this.liveness.name === 'none' },
     ];
     return {
       status: session.status,
@@ -69,6 +71,7 @@ export class UploadsService {
       steps,
       uploaded: session.documents.map((d) => d.kind),
       liveness: this.liveness.name !== 'none',
+      livenessStarted: session.livenessSessionId !== null,
     };
   }
 
@@ -170,8 +173,9 @@ export class UploadsService {
   async submit(token: string) {
     const session = await this.openSession(token);
     const kinds = new Set(session.documents.map((d) => d.kind));
-    if (!kinds.has(DocumentKind.ID_FRONT) || !kinds.has(DocumentKind.SELFIE)) {
-      throw new BadRequestException('ID_FRONT and SELFIE are required before submitting');
+    // The face comes from the selfie or from a liveness challenge (whose verdict the pipeline reads)
+    if (!kinds.has(DocumentKind.ID_FRONT) || (!kinds.has(DocumentKind.SELFIE) && !session.livenessSessionId)) {
+      throw new BadRequestException('ID_FRONT and a SELFIE (or a liveness check) are required before submitting');
     }
     if (session.requireLicence && (!kinds.has(DocumentKind.ID_BACK) || !kinds.has(DocumentKind.LICENCE_FRONT))) {
       throw new BadRequestException('ID_BACK and LICENCE_FRONT are required for a session that asks for a driving licence');

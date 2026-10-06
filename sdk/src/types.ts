@@ -116,8 +116,10 @@ export interface UploadSessionInfo {
   /** In the order to ask for them. */
   steps: { kind: DocumentKind; required: boolean }[];
   uploaded: DocumentKind[];
-  /** Whether a liveness provider is configured. */
+  /** Whether a liveness provider is configured. When it is, the selfie is optional: the liveness challenge replaces it. */
   liveness: boolean;
+  /** Whether a liveness challenge has been started for this session (POST .../liveness). */
+  livenessStarted?: boolean;
 }
 
 export interface UsageSummary {
