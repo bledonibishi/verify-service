@@ -96,7 +96,36 @@ describe('TesseractProvider tries cleaned-up images only when asked and only whe
     const f = flaky(1000);
     const r = await new TesseractProvider(f.bin).readText(await photo(), { accept: () => false });
     expect(r.text).toBe('BAD\n');
-    expect(f.runs()).toBeLessThanOrEqual(19); // the photo as given, then at most 18 variants
+    // the photo as given, the three other turns of it, then at most 18 variants of each of the four
+    expect(f.runs()).toBeLessThanOrEqual(76);
+  });
+
+  it('cleans up the turn whose reading looked like an MRZ (full of <) first', async () => {
+    const dir4 = mkdtempSync(join(tmpdir(), 'tess-turn-'));
+    try {
+      // Runs: 1 the photo as given, 2-4 turned 90, 270 and 180. Run 3 (270) sees fillers; run 5,
+      // the first cleaned-up image, is kept for inspection.
+      const counter = join(dir4, 'count');
+      const kept = join(dir4, 'kept.png');
+      writeFileSync(counter, '');
+      const bin = join(dir4, 'turns');
+      writeFileSync(bin, `#!/bin/sh\necho x >> "${counter}"\nn=$(wc -l < "${counter}")\nif [ $n -eq 5 ]; then cat > "${kept}"; else cat >/dev/null; fi\nif [ $n -eq 3 ]; then echo "I<RKS<<<<<<<<<<<<<"; else echo BAD; fi\n`);
+      chmodSync(bin, 0o755);
+      // 800 x 600: a variant of the upright photo is far shorter than one of the photo turned on its side
+      const wide = await sharp({ create: { width: 800, height: 600, channels: 3, background: '#cccccc' } }).png().toBuffer();
+      await new TesseractProvider(bin).readText(wide, { accept: () => false });
+      const m = await sharp(readFileSync(kept)).metadata();
+      expect(m.height!).toBeGreaterThan(1000); // the bottom of the 600 x 800 turned photo, enlarged
+    } finally {
+      rmSync(dir4, { recursive: true, force: true });
+    }
+  });
+
+  it('accepts a turned photo that reads as it is, before any cleaning up', async () => {
+    const f = flaky(2); // the photo as given and turned 90 are bad, turned 270 reads
+    const r = await new TesseractProvider(f.bin).readText(await photo(), { accept: (t) => t.includes('GOOD') });
+    expect(r.text).toBe('GOOD\n');
+    expect(f.runs()).toBe(3);
   });
 
   it('stays within the total time budget even when the engine hangs on the variants', async () => {

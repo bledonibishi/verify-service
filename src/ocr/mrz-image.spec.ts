@@ -88,6 +88,16 @@ const haveTesseract = spawnSync('tesseract', ['--version']).status === 0;
     expect(mrzReadable(text)).toBe(true);
   }, 120_000);
 
+  it.each([90, 270, 180] as const)('reads a card photographed turned %i degrees', async (degrees) => {
+    const { TesseractProvider } = await import('./tesseract.provider');
+    const { mrzReadable } = await import('../verification/decision');
+    const photo = await sharp(await renderCard({ photo: true })).rotate(degrees).jpeg().toBuffer();
+    const engine = new TesseractProvider();
+    expect(mrzReadable((await engine.readText(photo)).text)).toBe(false);
+    const { text } = await engine.readText(photo, { accept: (t) => mrzReadable(t) });
+    expect(mrzReadable(text)).toBe(true);
+  }, 120_000);
+
   it('reads a grey, blurred photo that the unmodified image does not give', async () => {
     const { TesseractProvider } = await import('./tesseract.provider');
     const { mrzReadable } = await import('../verification/decision');

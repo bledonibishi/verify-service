@@ -25,6 +25,19 @@ const BORDER = 60;
 const BANDS: [number, number][] = [[0.65, 0.35], [0.5, 0.5], [0.75, 0.25], [0.45, 0.4], [0.3, 0.4], [0, 1]];
 const THRESHOLDS: (number | null)[] = [null, 125, 155];
 
+/**
+ * The photo turned clockwise by a quarter-turn multiple, upright as stored (EXIF applied first),
+ * for a card photographed sideways or upside down. Null if it cannot be made.
+ */
+export async function rotateImage(image: Buffer, degrees: 90 | 180 | 270): Promise<Buffer | null> {
+  try {
+    // Fast compression: the result goes straight to the engine, never to disk
+    return await sharp(image, { limitInputPixels: MAX_INPUT_PIXELS }).rotate().rotate(degrees).png({ compressionLevel: 1 }).toBuffer();
+  } catch {
+    return null;
+  }
+}
+
 export interface MrzVariantOptions {
   /** Upper bound on how many variants are produced. */
   max?: number;
