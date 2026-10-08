@@ -488,6 +488,26 @@ describe('hosted page with a liveness provider', () => {
     expect(link.getAttribute('href')).not.toContain(TOKEN); // the token never goes into a URL
   });
 
+  it('gives the photosensitivity warning before the face check starts, with the selfie as the way out', async () => {
+    const env = boot({ session: ok(LIVE) });
+    await throughDocuments(env);
+    expect(text(env.doc)).toContain('Photosensitivity warning');
+    expect(text(env.doc)).toContain('flashes different colours');
+    expect(button(env.doc, 'Cannot do the face check? Send a selfie instead')).toBeDefined();
+    // and once the check is done, the warning is not repeated
+    const done = boot({ storedToken: TOKEN, url: 'http://verify.test/verify?lang=en&liveness=done', session: ok({ ...LIVE, livenessStarted: true, uploaded: ['ID_FRONT', 'ID_BACK'] }) });
+    await flush();
+    button(done.doc, 'Choose another')!.click(); // back through the steps from the review
+    await flush();
+    button(done.doc, 'Already sent')!.click(); // ID front
+    await flush();
+    button(done.doc, 'Already sent')!.click(); // ID back
+    await flush();
+    expect(h1(done.doc)).toBe('Face check');
+    expect(button(done.doc, 'Face check done')).toBeDefined();
+    expect(text(done.doc)).not.toContain('Photosensitivity warning');
+  });
+
   it('lets a person who cannot do the face check send a selfie instead, and remembers the choice', async () => {
     const env = boot({ session: ok(LIVE) });
     await throughDocuments(env);

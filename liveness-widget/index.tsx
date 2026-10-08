@@ -93,6 +93,9 @@ function mount(element: HTMLElement, o: MountOptions): () => void {
     <FaceLivenessDetectorCore
       sessionId={o.sessionId}
       region={o.region}
+      // AWS's own start screen (with its photosensitivity notice) is off: the capture page shows that
+      // warning on its face check step, in its own design, before the person chooses to start
+      disableStartScreen
       config={{ credentialProvider: async () => credentials }}
       displayText={o.lang && TEXT[o.lang] ? TEXT[o.lang] : undefined}
       onAnalysisComplete={async () => o.onComplete()}

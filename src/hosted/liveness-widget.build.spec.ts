@@ -17,6 +17,8 @@ describe('liveness widget bundle', () => {
     expect(existsSync(css)).toBe(true);
     const code = readFileSync(js, 'utf8');
     expect(code).toContain('VerifyLiveness');
+    // AWS's start screen is off (the capture page gives the photosensitivity warning itself)
+    expect(code).toContain('disableStartScreen:!0');
     // The page's policy forbids eval; the bundle must not need it
     expect(code).not.toMatch(/\bnew Function\(|\beval\(/);
     // No stylesheet pulled from elsewhere

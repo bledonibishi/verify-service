@@ -59,7 +59,8 @@ export const VERIFY_JS = `
       LICENCE_FRONT_TIPS: ['All four corners in the picture', 'No glare or shadow', 'The text is sharp and readable'],
       LICENCE_BACK_TIPS: ['The whole back in the picture', 'No glare or shadow'],
       SELFIE_TIPS: ['Face the camera in good light', 'No hat or sunglasses', 'Only your face in the picture'],
-      LIVENESS_TIPS: ['Find good, even light', 'Take off sunglasses and hats', 'Move closer when asked, then hold still']
+      LIVENESS_TIPS: ['Find good, even light', 'Take off sunglasses and hats', 'Move closer when asked, then hold still'],
+      warnTitle: 'Photosensitivity warning', warn: 'During the check the screen flashes different colours. If flashing light could affect you (for example epilepsy), send a selfie instead.'
     },
     sq: {
       title: 'Verifikoni identitetin tuaj', intro: 'Na duhen disa fotografi për të konfirmuar kush jeni. Zgjat rreth dy minuta.',
@@ -88,7 +89,8 @@ export const VERIFY_JS = `
       LICENCE_FRONT_TIPS: ['Të katër këndet në foto', 'Pa reflektim apo hije', 'Teksti i qartë dhe i lexueshëm'],
       LICENCE_BACK_TIPS: ['E gjithë pjesa e pasme në foto', 'Pa reflektim apo hije'],
       SELFIE_TIPS: ['Shikoni kamerën në dritë të mirë', 'Pa kapelë apo syze dielli', 'Vetëm fytyra juaj në foto'],
-      LIVENESS_TIPS: ['Gjeni dritë të mirë e të njëtrajtshme', 'Hiqni syzet e diellit dhe kapelën', 'Afrohuni kur t’ju kërkohet, pastaj rrini pa lëvizur']
+      LIVENESS_TIPS: ['Gjeni dritë të mirë e të njëtrajtshme', 'Hiqni syzet e diellit dhe kapelën', 'Afrohuni kur t’ju kërkohet, pastaj rrini pa lëvizur'],
+      warnTitle: 'Paralajmërim për ndjeshmërinë ndaj dritës', warn: 'Gjatë kontrollit ekrani ndriçon me ngjyra të ndryshme. Nëse drita që ndriçon mund t’ju prekë (për shembull epilepsia), dërgoni një selfi.'
     },
     sr: {
       title: 'Potvrdite svoj identitet', intro: 'Potrebno je nekoliko fotografija da potvrdimo ko ste. Traje oko dva minuta.',
@@ -117,7 +119,8 @@ export const VERIFY_JS = `
       LICENCE_FRONT_TIPS: ['Sva četiri ugla na slici', 'Bez odsjaja i senke', 'Tekst je oštar i čitljiv'],
       LICENCE_BACK_TIPS: ['Cela zadnja strana na slici', 'Bez odsjaja i senke'],
       SELFIE_TIPS: ['Gledajte u kameru na dobrom svetlu', 'Bez šešira i sunčanih naočara', 'Samo vaše lice na slici'],
-      LIVENESS_TIPS: ['Nađite dobro, ravnomerno svetlo', 'Skinite sunčane naočare i šešir', 'Približite se kada se zatraži, pa se ne pomerajte']
+      LIVENESS_TIPS: ['Nađite dobro, ravnomerno svetlo', 'Skinite sunčane naočare i šešir', 'Približite se kada se zatraži, pa se ne pomerajte'],
+      warnTitle: 'Upozorenje za osetljivost na svetlo', warn: 'Tokom provere ekran treperi različitim bojama. Ako treperavo svetlo može da vam naškodi (na primer epilepsija), pošaljite selfi.'
     }
   };
 
@@ -149,6 +152,8 @@ export const VERIFY_JS = `
     need: 'mb-[18px] grid gap-2.5',
     needItem: 'flex items-center gap-3 rounded-xl border border-line bg-soft px-3.5 py-3 [&_svg]:size-7 [&_svg]:flex-none [&_svg]:text-accent',
     note: 'mb-[18px] flex items-start gap-2.5 rounded-xl bg-soft px-3.5 py-3 text-sm text-muted [&_svg]:mt-0.5 [&_svg]:size-[18px] [&_svg]:flex-none',
+    warn: 'mb-5 flex items-start gap-2.5 rounded-xl bg-accent-weak px-3.5 py-3 text-sm text-accent-ink [&_svg]:mt-0.5 [&_svg]:size-[18px] [&_svg]:flex-none',
+    warnTitle: 'block font-semibold',
     primary: 'btn primary flex min-h-[52px] w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-accent bg-accent px-[18px] py-3 text-center font-semibold text-on-accent no-underline transition-colors hover:border-accent-hover hover:bg-accent-hover focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-accent focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-accent disabled:cursor-default disabled:opacity-50 [&_svg]:size-5',
     secondary: 'btn flex min-h-[52px] w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-line bg-card px-[18px] py-3 text-center font-semibold text-fg no-underline transition-colors hover:border-muted focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-accent focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-accent disabled:cursor-default disabled:opacity-50 [&_svg]:size-5',
     link: 'link min-h-11 w-full cursor-pointer font-semibold text-accent hover:underline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-accent',
@@ -181,6 +186,7 @@ export const VERIFY_JS = `
     camera: [24, [['path', { d: 'M4 8.5h3.2L9 6.5h6l1.8 2H20V18H4z' }], ['circle', { cx: 12, cy: 13, r: 3.2 }]]],
     image: [24, [['rect', { x: 3.5, y: 5, width: 17, height: 14, rx: 2.5 }], ['path', { d: 'M3.5 15.5l4.5-4.5 4 4 2.5-2.5 6 6' }], ['circle', { cx: 15.5, cy: 9.5, r: 1.4 }]]],
     dash: [24, [['path', { d: 'M7 12h10' }]]],
+    info: [24, [['circle', { cx: 12, cy: 12, r: 9 }], ['path', { d: 'M12 11v5.5M12 7.8v.4' }]]],
     ID_FRONT: [120, [['rect', { x: 14, y: 28, width: 92, height: 64, rx: 10 }], ['circle', { cx: 40, cy: 54, r: 9 }], ['path', { d: 'M27 79c2.6-7 7.4-10.5 13-10.5S50.4 72 53 79M64 48h28M64 60h20M64 72h26' }]]],
     ID_BACK: [120, [['rect', { x: 14, y: 28, width: 92, height: 64, rx: 10 }], ['path', { d: 'M26 42h40M26 52h26' }], ['path', { d: 'M24 68h72M24 76h72M24 84h52', 'stroke-dasharray': '4 3' }]]],
     LICENCE_FRONT: [120, [['rect', { x: 14, y: 28, width: 92, height: 64, rx: 10 }], ['path', { d: 'M14 42h92' }], ['circle', { cx: 38, cy: 62, r: 8 }], ['path', { d: 'M27 84c2.3-6 6.3-9 11-9s8.7 3 11 9M62 58h30M62 70h22' }]]],
@@ -464,6 +470,8 @@ export const VERIFY_JS = `
       el('h1', { class: C.h1, text: t('LIVENESS') }),
       el('p', { class: C.muted, text: t('LIVENESS_HINT') }),
       state.uploaded.LIVENESS ? null : tipList('LIVENESS'),
+      // AWS's own start screen is switched off: the warning it showed is given here, before the camera starts
+      state.uploaded.LIVENESS ? null : el('div', { class: C.warn, role: 'note' }, [icon('info'), el('span', {}, [el('strong', { class: C.warnTitle, text: t('warnTitle') }), el('span', { text: t('warn') })])]),
       el('div', { class: C.actions }, [
         state.uploaded.LIVENESS
           ? el('button', { class: C.primary, type: 'button', text: t('checkDone'), onclick: next })
@@ -672,21 +680,21 @@ export const LIVENESS_JS = `
       invalidTitle: 'Link not found', invalid: 'Open the link exactly as you received it, or ask for a new one.',
       failed: 'The face check did not work this time.', retry: 'Try again', back: 'Back', selfie: 'Send a selfie instead',
       tooMany: 'The face check was started too many times with this link. Send a selfie instead, or ask for a new link.',
-      brand: 'Secure identity check', follow: 'Follow the instructions in the frame below and keep your face inside the oval.',
+      brand: 'Secure identity check', follow: 'Follow the instructions in the frame below and keep your face inside the oval.', flashes: 'The screen will flash colours during the check.',
       tips: ['Find good, even light', 'Take off sunglasses and hats', 'Move closer when asked, then hold still'] },
     sq: { title: 'Kontrolli i fytyrës', preparing: 'Po përgatitet kontrolli i fytyrës…', unavailable: 'Kontrolli i fytyrës nuk mund të fillojë në këtë pajisje.',
       closedTitle: 'Kjo lidhje nuk mund të përdoret', closed: 'Ka skaduar ose është përdorur tashmë. Kërkoni një lidhje të re nga kompania që ju e dërgoi.',
       invalidTitle: 'Lidhja nuk u gjet', invalid: 'Hapeni lidhjen saktësisht ashtu siç e morët, ose kërkoni një të re.',
       failed: 'Kontrolli i fytyrës nuk funksionoi këtë herë.', retry: 'Provo përsëri', back: 'Kthehu', selfie: 'Dërgoni një selfi',
       tooMany: 'Kontrolli i fytyrës u nis shumë herë me këtë lidhje. Dërgoni një selfi, ose kërkoni një lidhje të re.',
-      brand: 'Verifikim i sigurt i identitetit', follow: 'Ndiqni udhëzimet në kornizën më poshtë dhe mbani fytyrën brenda ovalit.',
+      brand: 'Verifikim i sigurt i identitetit', follow: 'Ndiqni udhëzimet në kornizën më poshtë dhe mbani fytyrën brenda ovalit.', flashes: 'Gjatë kontrollit ekrani do të ndriçojë me ngjyra.',
       tips: ['Gjeni dritë të mirë e të njëtrajtshme', 'Hiqni syzet e diellit dhe kapelën', 'Afrohuni kur t’ju kërkohet, pastaj rrini pa lëvizur'] },
     sr: { title: 'Provera lica', preparing: 'Priprema provere lica…', unavailable: 'Provera lica ne može da počne na ovom uređaju.',
       closedTitle: 'Ova veza se ne može koristiti', closed: 'Istekla je ili je već iskorišćena. Zatražite novu vezu od kompanije koja vam je poslala.',
       invalidTitle: 'Veza nije pronađena', invalid: 'Otvorite vezu tačno onako kako ste je dobili ili zatražite novu.',
       failed: 'Provera lica ovaj put nije uspela.', retry: 'Pokušaj ponovo', back: 'Nazad', selfie: 'Pošaljite selfi',
       tooMany: 'Provera lica je pokrenuta previše puta sa ovom vezom. Pošaljite selfi ili zatražite novu vezu.',
-      brand: 'Bezbedna provera identiteta', follow: 'Pratite uputstva u okviru ispod i držite lice unutar ovala.',
+      brand: 'Bezbedna provera identiteta', follow: 'Pratite uputstva u okviru ispod i držite lice unutar ovala.', flashes: 'Tokom provere ekran će treperiti bojama.',
       tips: ['Nađite dobro, ravnomerno svetlo', 'Skinite sunčane naočare i šešir', 'Približite se kada se zatraži, pa se ne pomerajte'] }
   };
 
@@ -696,6 +704,7 @@ export const LIVENESS_JS = `
     card: 'mt-3 rounded-2xl border border-line bg-card p-7 shadow-card max-sm:px-[18px] max-sm:py-[22px]',
     h1: 'mb-2 text-2xl leading-tight font-bold tracking-tight focus:outline-none',
     muted: 'mb-3 text-muted',
+    flashes: 'mb-0 text-sm font-semibold text-accent-ink',
     art: 'mb-5 flex h-[132px] items-center justify-center rounded-[14px] bg-accent-weak text-accent [&_svg]:size-28',
     artBad: 'mb-5 flex h-[132px] items-center justify-center rounded-[14px] bg-bad-weak text-bad [&_svg]:size-28',
     tips: 'mt-1 mb-5',
@@ -801,7 +810,11 @@ export const LIVENESS_JS = `
   function heading() {
     header();
     while (app.firstChild) app.removeChild(app.firstChild);
-    app.appendChild(el('div', { class: C.card }, [el('h1', { class: C.h1, text: t('title') }), el('p', { class: C.muted, text: t('follow') })]));
+    app.appendChild(el('div', { class: C.card }, [
+      el('h1', { class: C.h1, text: t('title') }),
+      el('p', { class: C.muted, text: t('follow') }),
+      el('p', { class: C.flashes, text: t('flashes') })
+    ]));
   }
 
   // Back to the capture page, which carries on from the next required step. The outcome travels in
