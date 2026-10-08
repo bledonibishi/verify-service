@@ -2,12 +2,12 @@
  * Checks the ID back of a case already submitted, from its stored (encrypted) photo, the way the
  * service reads it, without ever writing the photo out:
  *
- *   pnpm check:session <sessionId> [--shape] [--variants]
+ *   pnpm check:session <sessionId> [--shape] [--variants] [--letters]
  *
  * Run it with the same storage settings as the service (for a local run: STORAGE_DRIVER=local
  * STORAGE_KEY_PROVIDER=env in front, as when starting the service). Prints only pass/fail per check,
  * issue codes, how the provided name and birth date differ from the card (word counts, look-alike
- * letters; never the names themselves) and, with --shape / --variants, the OCR text's shape (digits as 9, letters as A):
+ * letters; never the names themselves, except with --letters: the differing letters only) and, with --shape / --variants, the OCR text's shape (digits as 9, letters as A):
  * safe to paste into a chat or issue. Needs tesseract.
  */
 import { DocumentKind, PrismaClient } from '@prisma/client';

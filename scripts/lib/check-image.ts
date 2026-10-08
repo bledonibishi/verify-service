@@ -28,8 +28,8 @@ export async function checkImage(image: Buffer, flags: string[], expected: { fir
       console.log(`  document expired: ${read.result.data.expired ? 'yes' : 'no'}`);
       console.log(`  issuer RKS: ${read.result.data.issuingState === 'RKS' ? 'yes' : 'no'}`);
       // How the provided details differ from the card, without showing either
-      if (expected.lastName) console.log(`  surname vs provided: ${describeNameDiff(expected.lastName, read.result.data.surname)}`);
-      if (expected.firstName) console.log(`  given names vs provided: ${describeNameDiff(expected.firstName, read.result.data.givenNames)}`);
+      if (expected.lastName) console.log(`  surname vs provided: ${describeNameDiff(expected.lastName, read.result.data.surname, flags.includes('--letters'))}`);
+      if (expected.firstName) console.log(`  given names vs provided: ${describeNameDiff(expected.firstName, read.result.data.givenNames, flags.includes('--letters'))}`);
       if (expected.birthDate) console.log(`  birth date vs provided: ${expected.birthDate === read.result.data.birthDate ? 'same' : 'differs'}`);
     }
   }

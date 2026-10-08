@@ -9,7 +9,11 @@ import { normalizeName } from '../../src/documents/mrz';
 const LOOKALIKES = ['IL1T', 'O0DQ', 'B8', 'S5', 'Z2', 'G6', 'EF', 'KX', 'MN', 'UV', 'CG'];
 const lookalike = (a: string, b: string) => LOOKALIKES.some((g) => g.includes(a) && g.includes(b));
 
-export function describeNameDiff(provided: string, read: string): string {
+/**
+ * With `letters`, also shows each differing pair (position, the letter read, the letter provided):
+ * opt-in, for the person whose own card it is, to find which letter the OCR confuses.
+ */
+export function describeNameDiff(provided: string, read: string, letters = false): string {
   const p = normalizeName(provided).split(' ').filter(Boolean);
   const r = normalizeName(read).split(' ').filter(Boolean);
   if (p.join(' ') === r.join(' ')) return 'same';
@@ -25,6 +29,11 @@ export function describeNameDiff(provided: string, read: string): string {
       const diffs = same.map((w) => [...w].map((c, k) => [c, word[k]] as const).filter(([a, b]) => a !== b));
       const best = diffs.reduce((x, y) => (y.length < x.length ? y : x));
       parts.push(`word ${i + 1}: ${best.length} letter(s) differ in a read word of the same length (${best.every(([a, b]) => lookalike(a, b)) ? 'all OCR look-alikes' : 'not all look-alikes'})`);
+      if (letters) {
+        const w = same[diffs.indexOf(best)];
+        const pairs = [...w].map((c, k) => [k, c, word[k]] as const).filter(([, a, b]) => a !== b);
+        parts.push(pairs.map(([k, a, b]) => `letter ${k + 1} of ${w.length}: read ${a}, provided ${b}`).join(', '));
+      }
       return;
     }
     const lengths = r.map((w) => w.length - word.length);
