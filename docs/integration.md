@@ -84,6 +84,9 @@ The upload endpoints answer CORS for any origin because the one-time token, not 
 
 ## The hosted page
 
+Styled with Tailwind CSS (v4): the classes live in `src/hosted/page.ts`, the design tokens in `src/hosted/tailwind.css`, and `pnpm build` (or `pnpm build:css`) turns them into a static `hosted-dist/app.css` that the service serves at `/verify/app.css`. Never use the Tailwind CDN script: the page's security policy blocks inline styles and code from other sites.
+
+
 `GET /verify#<token>`: a small static page (no framework, no third-party resources) that:
 
 - asks for the ID front and back, the licence front and back when requested, and a selfie, in the order the service returns (`GET /v1/upload/:token`);

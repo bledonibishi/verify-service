@@ -4,7 +4,7 @@
   "private": true,
   "description": "Standalone multi-tenant identity verification service",
   "scripts": {
-    "build": "nest build && node scripts/build-liveness.mjs",
+    "build": "nest build && tailwindcss -i src/hosted/tailwind.css -o hosted-dist/app.css --minify && node scripts/build-liveness.mjs",
     "sdk:build": "tsc -p sdk/tsconfig.json",
     "start": "node dist/src/main",
     "start:dev": "nest start --watch",
@@ -26,7 +26,8 @@
     "check:photo": "ts-node scripts/check-photo.ts",
     "check:face": "ts-node scripts/check-face.ts",
     "check:liveness": "ts-node scripts/check-liveness.ts",
-    "build:liveness": "node scripts/build-liveness.mjs"
+    "build:liveness": "node scripts/build-liveness.mjs",
+    "build:css": "tailwindcss -i src/hosted/tailwind.css -o hosted-dist/app.css --minify"
   },
   "engines": {
     "node": ">=20.12"
@@ -54,6 +55,7 @@
     "@aws-amplify/ui-react-liveness": "^3.7.0",
     "@nestjs/cli": "^10.4.9",
     "@nestjs/testing": "^10.4.22",
+    "@tailwindcss/cli": "^4.3.3",
     "@types/express": "^4.17.25",
     "@types/jest": "^29.5.14",
     "@types/jsdom": "^21.1.7",
@@ -70,6 +72,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "supertest": "^7.3.0",
+    "tailwindcss": "^4.3.3",
     "ts-jest": "^29.4.14",
     "ts-node": "^10.9.2",
     "typescript": "^5.7.2"

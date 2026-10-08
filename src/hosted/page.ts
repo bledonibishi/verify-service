@@ -18,86 +18,14 @@ export const VERIFY_HTML = `<!doctype html>
 <link rel="stylesheet" href="/verify/app.css">
 </head>
 <body>
-<header class="top" id="top"></header>
-<main id="app" aria-live="polite"></main>
-<noscript><p class="wrap">This page needs JavaScript to take and send your photos.</p></noscript>
+<header class="mx-auto flex max-w-[520px] items-center justify-between gap-3 px-4 pt-4" id="top"></header>
+<main class="mx-auto max-w-[520px] px-4 pt-3 pb-8" id="app" aria-live="polite"></main>
+<noscript><p class="p-4">This page needs JavaScript to take and send your photos.</p></noscript>
 <script src="/verify/app.js"></script>
 </body>
 </html>`;
 
-export const VERIFY_CSS = `
-:root{color-scheme:light dark;
-  --bg:#f3f5fa;--fg:#0f172a;--card:#fff;--line:#e3e7ef;--muted:#5d6678;--soft:#f6f8fc;
-  --accent:#2448d0;--accent-hover:#1d3bb0;--accent-weak:#eaf0ff;--accent-ink:#1e3a8a;--on-accent:#fff;
-  --ok:#15803d;--ok-weak:#e8f6ee;--bad:#b42318;--bad-weak:#fdecea;
-  --radius:16px;--shadow:0 1px 2px rgba(15,23,42,.05),0 12px 32px rgba(15,23,42,.07)}
-@media (prefers-color-scheme:dark){:root{
-  --bg:#0c1016;--fg:#e8ebf1;--card:#151a22;--line:#262d38;--muted:#9aa4b4;--soft:#1a2029;
-  --accent:#6f95ff;--accent-hover:#89a8ff;--accent-weak:#1c2640;--accent-ink:#c7d5ff;--on-accent:#0a1230;
-  --ok:#4ade80;--ok-weak:#12291c;--bad:#f87171;--bad-weak:#2f1616;--shadow:none}}
-*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
-[hidden]{display:none!important}
-body{margin:0;font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased}
-.top{display:flex;align-items:center;justify-content:space-between;gap:12px;max-width:520px;margin:0 auto;padding:16px 16px 0}
-.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;color:var(--muted)}
-.brand svg{width:20px;height:20px;color:var(--accent)}
-.lang{display:inline-flex;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:3px}
-.lang button{width:auto;margin:0;padding:4px 12px;border:0;border-radius:999px;background:transparent;color:var(--muted);font-size:13px;font-weight:600;min-height:0}
-.lang button[aria-pressed=true]{background:var(--accent-weak);color:var(--accent-ink)}
-main{max-width:520px;margin:0 auto;padding:12px 16px 32px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:28px;margin-top:12px}
-@media (max-width:480px){.card{padding:22px 18px}}
-h1{font-size:24px;line-height:1.25;letter-spacing:-.01em;margin:0 0 8px}
-h1:focus{outline:none}
-p{margin:0 0 12px}.muted{color:var(--muted)}.small{font-size:14px}
-.stepline{display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:600;color:var(--muted);margin:0 0 10px;text-transform:uppercase;letter-spacing:.04em}
-.badge{font-size:12px;font-weight:600;text-transform:none;letter-spacing:0;background:var(--soft);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
-.progress{display:flex;gap:6px;margin:0 0 22px}.progress span{flex:1;height:5px;border-radius:3px;background:var(--line)}
-.progress span.done{background:var(--ok)}.progress span.now{background:var(--accent)}
-.art{display:flex;align-items:center;justify-content:center;height:132px;border-radius:14px;background:var(--accent-weak);color:var(--accent);margin:0 0 20px}
-.art svg{width:112px;height:112px}
-.art.ok{background:var(--ok-weak);color:var(--ok)}.art.bad{background:var(--bad-weak);color:var(--bad)}
-.tips{list-style:none;padding:0;margin:4px 0 20px}
-.tips li{display:flex;gap:10px;align-items:flex-start;padding:6px 0;color:var(--fg)}
-.tips li svg{flex:none;width:20px;height:20px;margin-top:2px;color:var(--ok)}
-.need{list-style:none;padding:0;margin:0 0 18px;display:grid;gap:10px}
-.need li{display:flex;gap:12px;align-items:center;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:var(--soft)}
-.need li svg{flex:none;width:28px;height:28px;color:var(--accent)}
-.note{display:flex;gap:10px;align-items:flex-start;font-size:14px;color:var(--muted);background:var(--soft);border-radius:12px;padding:12px 14px;margin:0 0 18px}
-.note svg{flex:none;width:18px;height:18px;margin-top:2px}
-.actions{display:grid;gap:10px;margin-top:8px}
-button,label.btn,a.btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-height:52px;font:inherit;font-weight:600;text-align:center;text-decoration:none;padding:12px 18px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;margin:0;transition:background-color .15s,border-color .15s}
-button:hover,label.btn:hover,a.btn:hover{border-color:var(--muted)}
-button.primary,label.btn.primary,a.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
-button.primary:hover,label.btn.primary:hover,a.btn.primary:hover{background:var(--accent-hover);border-color:var(--accent-hover)}
-button.link{min-height:44px;border:0;background:transparent;color:var(--accent);font-weight:600}
-button.link:hover{text-decoration:underline}
-button svg,label.btn svg,a.btn svg{width:20px;height:20px}
-button:disabled{opacity:.5;cursor:default}
-button:focus-visible,label.btn:focus-within,a.btn:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
-input[type=file]{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}
-.preview{display:block;width:100%;max-height:300px;object-fit:contain;border-radius:12px;border:1px solid var(--line);background:#0b0f15;margin:0 0 16px}
-.err{color:var(--bad);margin:12px 0 0}.err:empty{display:none}.ok{color:var(--ok)}
-.status{margin:12px 0 0;color:var(--muted);text-align:center}.status:empty{display:none}
-.rows{border:1px solid var(--line);border-radius:12px;margin:8px 0 18px;overflow:hidden}
-.row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-top:1px solid var(--line)}
-.row:first-child{border-top:0}
-.row .state{display:flex;align-items:center;gap:6px;font-weight:600;font-size:14px}
-.row .state svg{width:18px;height:18px}
-.foot{display:flex;align-items:center;justify-content:center;gap:6px;font-size:13px;color:var(--muted);margin:18px 0 0}
-.foot svg{width:14px;height:14px}
-.widget{margin-top:16px;border-radius:14px;overflow:hidden;border:1px solid var(--line);background:var(--card);
-  --amplify-colors-primary-10:#eaf0ff;--amplify-colors-primary-20:#d6e1ff;--amplify-colors-primary-40:#9fb6ff;--amplify-colors-primary-60:#4f73e6;
-  --amplify-colors-primary-80:#2448d0;--amplify-colors-primary-90:#1d3bb0;--amplify-colors-primary-100:#172f8f;
-  --amplify-fonts-default-variable:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;--amplify-fonts-default-static:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  --amplify-radii-small:10px;--amplify-radii-medium:12px;--amplify-radii-large:14px}
-.widget:empty{display:none}
-/* The face check page also loads the widget's stylesheet, which resets buttons and line height for the whole page */
-main,.top{line-height:1.55}
-main button,main label.btn,main a.btn{font-weight:600}
-main button.link{font-weight:600}
-.widget .amplify-button--primary{min-height:52px;font-weight:600;border-radius:12px}
-`;
+// The stylesheet is built by Tailwind from tailwind.css and the class names below (hosted-dist/app.css).
 
 export const VERIFY_JS = `
 (function () {
@@ -193,6 +121,47 @@ export const VERIFY_JS = `
     }
   };
 
+
+  // Tailwind classes (built into /verify/app.css by the Tailwind CLI; see tailwind.css). Kept as
+  // whole literal strings so the build finds them. The first word of some is a plain marker
+  // (btn, primary, preview) that the tests and scripts select by.
+  var C = {
+    card: 'mt-3 rounded-2xl border border-line bg-card p-7 shadow-card max-sm:px-[18px] max-sm:py-[22px]',
+    h1: 'mb-2 text-2xl leading-tight font-bold tracking-tight focus:outline-none',
+    muted: 'mb-3 text-muted',
+    smallMuted: 'mb-3 text-sm text-muted',
+    art: 'mb-5 flex h-[132px] items-center justify-center rounded-[14px] bg-accent-weak text-accent [&_svg]:size-28',
+    artOk: 'mb-5 flex h-[132px] items-center justify-center rounded-[14px] bg-ok-weak text-ok [&_svg]:size-28',
+    artBad: 'mb-5 flex h-[132px] items-center justify-center rounded-[14px] bg-bad-weak text-bad [&_svg]:size-28',
+    tips: 'mt-1 mb-5',
+    tip: 'flex items-start gap-2.5 py-1.5 [&_svg]:mt-0.5 [&_svg]:size-5 [&_svg]:flex-none [&_svg]:text-ok',
+    progress: 'progress mb-[22px] flex gap-1.5',
+    seg: 'h-[5px] flex-1 rounded-sm bg-line',
+    segDone: 'done h-[5px] flex-1 rounded-sm bg-ok',
+    segNow: 'now h-[5px] flex-1 rounded-sm bg-accent',
+    stepline: 'mb-2.5 flex items-center justify-between text-[13px] font-semibold tracking-wider text-muted uppercase',
+    badge: 'rounded-full border border-line bg-soft px-2.5 py-0.5 text-xs font-semibold tracking-normal normal-case',
+    brand: 'flex items-center gap-2 text-[15px] font-semibold text-muted [&_svg]:size-5 [&_svg]:text-accent',
+    lang: 'inline-flex rounded-full border border-line bg-card p-[3px]',
+    langBtn: 'cursor-pointer rounded-full px-3 py-1 text-[13px] font-semibold text-muted aria-pressed:bg-accent-weak aria-pressed:text-accent-ink',
+    foot: 'mt-[18px] flex items-center justify-center gap-1.5 text-[13px] text-muted [&_svg]:size-3.5',
+    actions: 'mt-2 grid gap-2.5',
+    need: 'mb-[18px] grid gap-2.5',
+    needItem: 'flex items-center gap-3 rounded-xl border border-line bg-soft px-3.5 py-3 [&_svg]:size-7 [&_svg]:flex-none [&_svg]:text-accent',
+    note: 'mb-[18px] flex items-start gap-2.5 rounded-xl bg-soft px-3.5 py-3 text-sm text-muted [&_svg]:mt-0.5 [&_svg]:size-[18px] [&_svg]:flex-none',
+    primary: 'btn primary flex min-h-[52px] w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-accent bg-accent px-[18px] py-3 text-center font-semibold text-on-accent no-underline transition-colors hover:border-accent-hover hover:bg-accent-hover focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-accent focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-accent disabled:cursor-default disabled:opacity-50 [&_svg]:size-5',
+    secondary: 'btn flex min-h-[52px] w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-line bg-card px-[18px] py-3 text-center font-semibold text-fg no-underline transition-colors hover:border-muted focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-accent focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-accent disabled:cursor-default disabled:opacity-50 [&_svg]:size-5',
+    link: 'link min-h-11 w-full cursor-pointer font-semibold text-accent hover:underline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-accent',
+    fileInput: 'sr-only',
+    preview: 'preview mb-4 block max-h-[300px] w-full rounded-xl border border-line bg-[#0b0f15] object-contain',
+    err: 'mt-3 text-bad empty:hidden',
+    status: 'mt-3 text-center text-muted empty:hidden',
+    rows: 'mt-2 mb-[18px] divide-y divide-line overflow-hidden rounded-xl border border-line',
+    row: 'flex items-center justify-between gap-3 px-4 py-3.5',
+    stateOk: 'flex items-center gap-1.5 text-sm font-semibold text-ok [&_svg]:size-[18px]',
+    stateTodo: 'flex items-center gap-1.5 text-sm font-semibold text-muted [&_svg]:size-[18px]'
+  };
+
   var MAX_EDGE = 2000;
   var MAX_BYTES = 7 * 1024 * 1024; // the service accepts 8 MB
   var app = document.getElementById('app');
@@ -238,20 +207,20 @@ export const VERIFY_JS = `
     });
     return svg;
   }
-  function art(name, tone) { return el('div', { class: 'art' + (tone ? ' ' + tone : '') }, [icon(name)]); }
+  function art(name, tone) { return el('div', { class: tone === 'ok' ? C.artOk : tone === 'bad' ? C.artBad : C.art }, [icon(name)]); }
   function tipList(key) {
     var list = tips(key);
-    return list.length ? el('ul', { class: 'tips' }, list.map(function (x) { return el('li', {}, [icon('check'), el('span', { text: x })]); })) : null;
+    return list.length ? el('ul', { class: C.tips }, list.map(function (x) { return el('li', { class: C.tip }, [icon('check'), el('span', { text: x })]); })) : null;
   }
   function progress(index) {
-    return el('div', { class: 'progress', 'aria-hidden': 'true' }, state.steps.map(function (s, i) {
-      return el('span', { class: state.uploaded[s.kind] ? 'done' : (i === index ? 'now' : '') });
+    return el('div', { class: C.progress, 'aria-hidden': 'true' }, state.steps.map(function (s, i) {
+      return el('span', { class: state.uploaded[s.kind] ? C.segDone : (i === index ? C.segNow : C.seg) });
     }));
   }
   function stepLine(index, optional) {
-    return el('div', { class: 'stepline' }, [
+    return el('div', { class: C.stepline }, [
       el('span', { text: t('step') + ' ' + (index + 1) + ' ' + t('of') + ' ' + state.steps.length }),
-      optional ? el('span', { class: 'badge', text: t('optional') }) : null
+      optional ? el('span', { class: C.badge, text: t('optional') }) : null
     ]);
   }
 
@@ -284,9 +253,9 @@ export const VERIFY_JS = `
     var top = document.getElementById('top');
     if (top) {
       while (top.firstChild) top.removeChild(top.firstChild);
-      top.appendChild(el('div', { class: 'brand' }, [icon('shield'), el('span', { text: t('brand') })]));
-      top.appendChild(el('div', { class: 'lang', role: 'group', 'aria-label': t('language') }, ['en', 'sq', 'sr'].map(function (code) {
-        return el('button', { type: 'button', text: code.toUpperCase(), 'aria-pressed': String(code === lang), onclick: function () {
+      top.appendChild(el('div', { class: C.brand }, [icon('shield'), el('span', { text: t('brand') })]));
+      top.appendChild(el('div', { class: C.lang, role: 'group', 'aria-label': t('language') }, ['en', 'sq', 'sr'].map(function (code) {
+        return el('button', { class: C.langBtn, type: 'button', text: code.toUpperCase(), 'aria-pressed': String(code === lang), onclick: function () {
           lang = code; document.documentElement.lang = code;
           try { sessionStorage.setItem('verify-lang', code); } catch (e) { /* ignore */ }
           show();
@@ -294,7 +263,7 @@ export const VERIFY_JS = `
       })));
     }
     nodes.forEach(function (n) { app.appendChild(n); });
-    app.appendChild(el('p', { class: 'foot' }, [icon('lock'), el('span', { text: t('foot') })]));
+    app.appendChild(el('p', { class: C.foot }, [icon('lock'), el('span', { text: t('foot') })]));
     var h = app.querySelector('h1');
     if (h) { h.setAttribute('tabindex', '-1'); h.focus({ preventScroll: true }); }
   }
@@ -376,11 +345,11 @@ export const VERIFY_JS = `
   function showFatal(titleKey, textKey, retry) {
     state.screen = 'fatal';
     state.fatal = [titleKey, textKey, retry];
-    render([el('div', { class: 'card' }, [
+    render([el('div', { class: C.card }, [
       art('ALERT', 'bad'),
-      el('h1', { text: t(titleKey) }),
-      textKey ? el('p', { class: 'muted', text: t(textKey) }) : null,
-      retry ? el('div', { class: 'actions' }, [el('button', { class: 'primary', type: 'button', text: t('tryAgain'), onclick: retry })]) : null
+      el('h1', { class: C.h1, text: t(titleKey) }),
+      textKey ? el('p', { class: C.muted, text: t(textKey) }) : null,
+      retry ? el('div', { class: C.actions }, [el('button', { class: C.primary, type: 'button', text: t('tryAgain'), onclick: retry })]) : null
     ])]);
   }
 
@@ -388,14 +357,14 @@ export const VERIFY_JS = `
     var needs = [['card', t('needId')]];
     if (state.steps.some(function (s) { return s.kind === 'LICENCE_FRONT'; })) needs.push(['card', t('needLicence')]);
     needs.push(['face', state.liveness && !state.selfieInstead ? t('needFace') : t('needSelfie')]);
-    render([el('div', { class: 'card' }, [
+    render([el('div', { class: C.card }, [
       art('START'),
-      el('h1', { text: t('title') }),
-      el('p', { class: 'muted', text: t('intro') }),
-      el('p', { class: 'small muted', text: t('need') }),
-      el('ul', { class: 'need' }, needs.map(function (n) { return el('li', {}, [icon(n[0]), el('span', { text: n[1] })]); })),
-      el('div', { class: 'note' }, [icon('lock'), el('span', { text: t('privacy') })]),
-      el('div', { class: 'actions' }, [el('button', { class: 'primary', type: 'button', text: t('start'), onclick: begin })])
+      el('h1', { class: C.h1, text: t('title') }),
+      el('p', { class: C.muted, text: t('intro') }),
+      el('p', { class: C.smallMuted, text: t('need') }),
+      el('ul', { class: C.need }, needs.map(function (n) { return el('li', { class: C.needItem }, [icon(n[0]), el('span', { text: n[1] })]); })),
+      el('div', { class: C.note }, [icon('lock'), el('span', { text: t('privacy') })]),
+      el('div', { class: C.actions }, [el('button', { class: C.primary, type: 'button', text: t('start'), onclick: begin })])
     ])]);
   }
 
@@ -415,18 +384,18 @@ export const VERIFY_JS = `
     var step = state.steps[state.index];
     var kind = step.kind;
     if (kind === 'LIVENESS') return showLiveness(step);
-    var err = el('p', { class: 'err', role: 'alert' });
-    var status = el('p', { class: 'status' });
-    var preview = el('img', { class: 'preview', alt: '', hidden: '' });
-    var useBtn = el('button', { class: 'primary', type: 'button', text: t('useThis'), hidden: '' });
+    var err = el('p', { class: C.err, role: 'alert' });
+    var status = el('p', { class: C.status });
+    var preview = el('img', { class: C.preview, alt: '', hidden: '' });
+    var useBtn = el('button', { class: C.primary, type: 'button', text: t('useThis'), hidden: '' });
     var capture = kind === 'SELFIE' ? 'user' : 'environment';
     var takeLabel = el('span', { text: t('takePhoto') });
     var chooseLabel = el('span', { text: t('choosePhoto') });
 
     function picker(labelNode, iconName, withCapture, primary) {
-      var input = el('input', { type: 'file', accept: 'image/*' });
+      var input = el('input', { class: C.fileInput, type: 'file', accept: 'image/*' });
       if (withCapture) input.setAttribute('capture', capture);
-      var label = el('label', { class: 'btn' + (primary ? ' primary' : '') }, [icon(iconName), labelNode, input]);
+      var label = el('label', { class: primary ? C.primary : C.secondary }, [icon(iconName), labelNode, input]);
       input.addEventListener('change', function () {
         var file = input.files && input.files[0];
         if (!file) return;
@@ -437,7 +406,7 @@ export const VERIFY_JS = `
         preview.hidden = false;
         useBtn.hidden = false;
         // With a photo in view, sending it is the main action; the pickers become "another one"
-        takeBtn.className = 'btn';
+        takeBtn.className = C.secondary;
         takeLabel.textContent = t('takeAnother');
         chooseLabel.textContent = t('chooseAnother');
         input.value = '';
@@ -466,20 +435,20 @@ export const VERIFY_JS = `
       });
     });
 
-    render([el('div', { class: 'card' }, [
+    render([el('div', { class: C.card }, [
       stepLine(state.index, !step.required),
       progress(state.index),
       art(kind),
-      el('h1', { text: t(kind) }),
-      el('p', { class: 'muted', text: t(kind + '_HINT') }),
+      el('h1', { class: C.h1, text: t(kind) }),
+      el('p', { class: C.muted, text: t(kind + '_HINT') }),
       tipList(kind),
       preview,
-      el('div', { class: 'actions' }, [
+      el('div', { class: C.actions }, [
         useBtn,
         takeBtn,
         chooseBtn,
-        state.uploaded[kind] ? el('button', { class: 'link', type: 'button', text: t('alreadySent'), onclick: next }) : null,
-        step.required ? null : el('button', { class: 'link', type: 'button', text: t('skip'), onclick: next })
+        state.uploaded[kind] ? el('button', { class: C.link, type: 'button', text: t('alreadySent'), onclick: next }) : null,
+        step.required ? null : el('button', { class: C.link, type: 'button', text: t('skip'), onclick: next })
       ]),
       status, err
     ])]);
@@ -488,18 +457,18 @@ export const VERIFY_JS = `
   // The challenge runs on its own page (/verify/liveness), which alone is allowed to reach AWS; it
   // comes back here when done. The token stays in this tab's sessionStorage, never in the URL.
   function showLiveness(step) {
-    render([el('div', { class: 'card' }, [
+    render([el('div', { class: C.card }, [
       stepLine(state.index, false),
       progress(state.index),
       art(state.uploaded.LIVENESS ? 'DONE' : 'LIVENESS', state.uploaded.LIVENESS ? 'ok' : ''),
-      el('h1', { text: t('LIVENESS') }),
-      el('p', { class: 'muted', text: t('LIVENESS_HINT') }),
+      el('h1', { class: C.h1, text: t('LIVENESS') }),
+      el('p', { class: C.muted, text: t('LIVENESS_HINT') }),
       state.uploaded.LIVENESS ? null : tipList('LIVENESS'),
-      el('div', { class: 'actions' }, [
+      el('div', { class: C.actions }, [
         state.uploaded.LIVENESS
-          ? el('button', { class: 'primary', type: 'button', text: t('checkDone'), onclick: next })
-          : el('a', { class: 'btn primary', href: livenessLink(), text: t('startCheck') }),
-        el('button', { class: 'link', type: 'button', text: t('selfieInstead'), onclick: function () { useSelfieInstead(); show(); } })
+          ? el('button', { class: C.primary, type: 'button', text: t('checkDone'), onclick: next })
+          : el('a', { class: C.primary, href: livenessLink(), text: t('startCheck') }),
+        el('button', { class: C.link, type: 'button', text: t('selfieInstead'), onclick: function () { useSelfieInstead(); show(); } })
       ])
     ])]);
   }
@@ -544,8 +513,8 @@ export const VERIFY_JS = `
 
   function showReview() {
     var missing = state.steps.some(function (s) { return s.required && !state.uploaded[s.kind]; });
-    var err = el('p', { class: 'err', role: 'alert', text: missing ? t('missing') : '' });
-    var btn = el('button', { class: 'primary', type: 'button', text: t('submit') });
+    var err = el('p', { class: C.err, role: 'alert', text: missing ? t('missing') : '' });
+    var btn = el('button', { class: C.primary, type: 'button', text: t('submit') });
     btn.disabled = missing;
     function reenable(message) { state.busy = false; btn.disabled = false; btn.textContent = t('submit'); err.textContent = message; }
     // A 410 says why: already submitted (this or another attempt got through) or no longer usable
@@ -584,17 +553,17 @@ export const VERIFY_JS = `
       unclear = 0;
       attempt();
     });
-    render([el('div', { class: 'card' }, [
-      el('h1', { text: t('review') }),
-      el('p', { class: 'muted', text: t('reviewText') }),
-      el('div', { class: 'rows' }, state.steps.map(function (s) {
+    render([el('div', { class: C.card }, [
+      el('h1', { class: C.h1, text: t('review') }),
+      el('p', { class: C.muted, text: t('reviewText') }),
+      el('div', { class: C.rows }, state.steps.map(function (s) {
         var done = !!state.uploaded[s.kind];
-        return el('div', { class: 'row' }, [
+        return el('div', { class: C.row }, [
           el('span', { text: t(s.kind) }),
-          el('span', { class: 'state ' + (done ? 'ok' : 'muted') }, [icon(done ? 'check' : 'dash'), el('span', { text: done ? '✓ ' + t('uploaded') : (s.required ? t('notSent') : t('optional')) })])
+          el('span', { class: done ? C.stateOk : C.stateTodo }, [icon(done ? 'check' : 'dash'), el('span', { text: done ? '✓ ' + t('uploaded') : (s.required ? t('notSent') : t('optional')) })])
         ]);
       })),
-      el('div', { class: 'actions' }, [btn, el('button', { type: 'button', text: t('retake'), onclick: function () { state.screen = 'step'; state.index = 0; show(); } })]),
+      el('div', { class: C.actions }, [btn, el('button', { class: C.secondary, type: 'button', text: t('retake'), onclick: function () { state.screen = 'step'; state.index = 0; show(); } })]),
       err
     ])]);
   }
@@ -605,7 +574,7 @@ export const VERIFY_JS = `
       sessionStorage.removeItem('verify-token');
       sessionStorage.setItem('verify-done', '1'); // a reload in this tab says thank you again, not "link not found"
     } catch (e) { /* ignore */ }
-    render([el('div', { class: 'card' }, [art('DONE', 'ok'), el('h1', { text: t('doneTitle') }), el('p', { class: 'muted', text: t('doneText') })])]);
+    render([el('div', { class: C.card }, [art('DONE', 'ok'), el('h1', { class: C.h1, text: t('doneTitle') }), el('p', { class: C.muted, text: t('doneText') })])]);
   }
 
   // ---- start -----------------------------------------------------------------------------------
@@ -682,12 +651,12 @@ export const LIVENESS_HTML = `<!doctype html>
 <link rel="stylesheet" href="/verify/liveness-widget.css">
 </head>
 <body>
-<header class="top" id="top"></header>
-<main>
+<header class="mx-auto flex max-w-[520px] items-center justify-between gap-3 px-4 pt-4" id="top"></header>
+<main class="mx-auto max-w-[520px] px-4 pt-3 pb-8">
 <div id="app" aria-live="polite"></div>
-<div id="widget" class="widget"></div>
+<div id="widget" class="widget mt-4 overflow-hidden rounded-[14px] border border-line bg-card empty:hidden"></div>
 </main>
-<noscript><p class="wrap">This page needs JavaScript for the face check.</p></noscript>
+<noscript><p class="p-4">This page needs JavaScript for the face check.</p></noscript>
 <script src="/verify/liveness-widget.js"></script>
 <script src="/verify/liveness.js"></script>
 </body>
@@ -719,6 +688,23 @@ export const LIVENESS_JS = `
       tooMany: 'Provera lica je pokrenuta previše puta sa ovom vezom. Pošaljite selfi ili zatražite novu vezu.',
       brand: 'Bezbedna provera identiteta', follow: 'Pratite uputstva u okviru ispod i držite lice unutar ovala.',
       tips: ['Nađite dobro, ravnomerno svetlo', 'Skinite sunčane naočare i šešir', 'Približite se kada se zatraži, pa se ne pomerajte'] }
+  };
+
+
+  // Tailwind classes, the same as on the capture page (see the note there)
+  var C = {
+    card: 'mt-3 rounded-2xl border border-line bg-card p-7 shadow-card max-sm:px-[18px] max-sm:py-[22px]',
+    h1: 'mb-2 text-2xl leading-tight font-bold tracking-tight focus:outline-none',
+    muted: 'mb-3 text-muted',
+    art: 'mb-5 flex h-[132px] items-center justify-center rounded-[14px] bg-accent-weak text-accent [&_svg]:size-28',
+    artBad: 'mb-5 flex h-[132px] items-center justify-center rounded-[14px] bg-bad-weak text-bad [&_svg]:size-28',
+    tips: 'mt-1 mb-5',
+    tip: 'flex items-start gap-2.5 py-1.5 [&_svg]:mt-0.5 [&_svg]:size-5 [&_svg]:flex-none [&_svg]:text-ok',
+    brand: 'flex items-center gap-2 text-[15px] font-semibold text-muted [&_svg]:size-5 [&_svg]:text-accent',
+    actions: 'mt-2 grid gap-2.5',
+    primary: 'btn primary flex min-h-[52px] w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-accent bg-accent px-[18px] py-3 text-center font-semibold text-on-accent no-underline transition-colors hover:border-accent-hover hover:bg-accent-hover focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-accent focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-accent disabled:cursor-default disabled:opacity-50 [&_svg]:size-5',
+    secondary: 'btn flex min-h-[52px] w-full cursor-pointer items-center justify-center gap-2 rounded-xl border border-line bg-card px-[18px] py-3 text-center font-semibold text-fg no-underline transition-colors hover:border-muted focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-accent focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-accent disabled:cursor-default disabled:opacity-50 [&_svg]:size-5',
+    link: 'link min-h-11 w-full cursor-pointer font-semibold text-accent hover:underline focus-visible:outline-3 focus-visible:outline-offset-2 focus-visible:outline-accent'
   };
 
   var app = document.getElementById('app');
@@ -790,7 +776,7 @@ export const LIVENESS_JS = `
   function header() {
     var top = document.getElementById('top');
     if (!top || top.firstChild) return;
-    top.appendChild(el('div', { class: 'brand' }, [icon('shield'), el('span', { text: t('brand') })]));
+    top.appendChild(el('div', { class: C.brand }, [icon('shield'), el('span', { text: t('brand') })]));
   }
 
   // tone: 'face' (the challenge), 'bad' (something went wrong), or none
@@ -799,14 +785,14 @@ export const LIVENESS_JS = `
     while (app.firstChild) app.removeChild(app.firstChild);
     var bad = tone === 'bad' || (tone === undefined && (titleKey === 'invalidTitle' || titleKey === 'closedTitle' || textKey === 'failed' || textKey === 'unavailable' || textKey === 'tooMany'));
     var tipList = textKey === 'preparing'
-      ? el('ul', { class: 'tips' }, (STRINGS[lang].tips || STRINGS.en.tips).map(function (x) { return el('li', {}, [icon('check'), el('span', { text: x })]); }))
+      ? el('ul', { class: C.tips }, (STRINGS[lang].tips || STRINGS.en.tips).map(function (x) { return el('li', { class: C.tip }, [icon('check'), el('span', { text: x })]); }))
       : null;
-    var card = el('div', { class: 'card' }, [
-      el('div', { class: 'art' + (bad ? ' bad' : '') }, [icon(bad ? 'alert' : 'face')]),
-      el('h1', { text: t(titleKey) }),
-      textKey ? el('p', { class: 'muted', text: t(textKey) }) : null,
+    var card = el('div', { class: C.card }, [
+      el('div', { class: bad ? C.artBad : C.art }, [icon(bad ? 'alert' : 'face')]),
+      el('h1', { class: C.h1, text: t(titleKey) }),
+      textKey ? el('p', { class: C.muted, text: t(textKey) }) : null,
       tipList,
-      actions && actions.length ? el('div', { class: 'actions' }, actions) : null
+      actions && actions.length ? el('div', { class: C.actions }, actions) : null
     ]);
     app.appendChild(card);
   }
@@ -815,7 +801,7 @@ export const LIVENESS_JS = `
   function heading() {
     header();
     while (app.firstChild) app.removeChild(app.firstChild);
-    app.appendChild(el('div', { class: 'card' }, [el('h1', { text: t('title') }), el('p', { class: 'muted', text: t('follow') })]));
+    app.appendChild(el('div', { class: C.card }, [el('h1', { class: C.h1, text: t('title') }), el('p', { class: C.muted, text: t('follow') })]));
   }
 
   // Back to the capture page, which carries on from the next required step. The outcome travels in
@@ -828,9 +814,9 @@ export const LIVENESS_JS = `
 
   function choices() {
     return [
-      el('button', { class: 'primary', type: 'button', text: t('retry'), onclick: start }),
-      el('button', { type: 'button', text: t('selfie'), onclick: function () { back('selfie'); } }),
-      el('button', { class: 'link', type: 'button', text: t('back'), onclick: function () { back('cancelled'); } })
+      el('button', { class: C.primary, type: 'button', text: t('retry'), onclick: start }),
+      el('button', { class: C.secondary, type: 'button', text: t('selfie'), onclick: function () { back('selfie'); } }),
+      el('button', { class: C.link, type: 'button', text: t('back'), onclick: function () { back('cancelled'); } })
     ];
   }
 

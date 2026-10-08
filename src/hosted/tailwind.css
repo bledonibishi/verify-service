@@ -1,0 +1,71 @@
+/*
+ * The hosted pages' stylesheet: built by the Tailwind CLI (pnpm build:css, part of pnpm build)
+ * into hosted-dist/app.css and served by the service at /verify/app.css. Styling lives in the
+ * class names in page.ts; this file holds the design tokens and the few rules utilities cannot
+ * express. Never the Tailwind CDN script: the pages' security policy forbids inline styles and
+ * code from other origins.
+ */
+@import "tailwindcss";
+@source "./page.ts";
+
+/* Colours as variables, so dark mode switches them in one place */
+:root {
+  color-scheme: light dark;
+  --bg: #f3f5fa; --fg: #0f172a; --card: #fff; --line: #e3e7ef; --muted: #5d6678; --soft: #f6f8fc;
+  --accent: #2448d0; --accent-hover: #1d3bb0; --accent-weak: #eaf0ff; --accent-ink: #1e3a8a; --on-accent: #fff;
+  --ok: #15803d; --ok-weak: #e8f6ee; --bad: #b42318; --bad-weak: #fdecea;
+  --card-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 12px 32px rgba(15, 23, 42, 0.07);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0c1016; --fg: #e8ebf1; --card: #151a22; --line: #262d38; --muted: #9aa4b4; --soft: #1a2029;
+    --accent: #6f95ff; --accent-hover: #89a8ff; --accent-weak: #1c2640; --accent-ink: #c7d5ff; --on-accent: #0a1230;
+    --ok: #4ade80; --ok-weak: #12291c; --bad: #f87171; --bad-weak: #2f1616;
+    --card-shadow: none;
+  }
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-fg: var(--fg);
+  --color-card: var(--card);
+  --color-line: var(--line);
+  --color-muted: var(--muted);
+  --color-soft: var(--soft);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-weak: var(--accent-weak);
+  --color-accent-ink: var(--accent-ink);
+  --color-on-accent: var(--on-accent);
+  --color-ok: var(--ok);
+  --color-ok-weak: var(--ok-weak);
+  --color-bad: var(--bad);
+  --color-bad-weak: var(--bad-weak);
+  --shadow-card: var(--card-shadow);
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@layer base {
+  html { -webkit-text-size-adjust: 100%; }
+  body { @apply bg-bg font-sans text-base leading-[1.55] text-fg antialiased; }
+}
+
+/*
+ * What utilities cannot reach.
+ *
+ * The AWS widget is styled through its own variables, set on its container. Unlayered on purpose:
+ * the widget's stylesheet (loaded after this one, unlayered) would otherwise win over anything in
+ * a Tailwind layer.
+ */
+.widget {
+  --amplify-colors-primary-10: #eaf0ff; --amplify-colors-primary-20: #d6e1ff; --amplify-colors-primary-40: #9fb6ff;
+  --amplify-colors-primary-60: #4f73e6; --amplify-colors-primary-80: #2448d0; --amplify-colors-primary-90: #1d3bb0;
+  --amplify-colors-primary-100: #172f8f;
+  --amplify-fonts-default-variable: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --amplify-fonts-default-static: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --amplify-radii-small: 10px; --amplify-radii-medium: 12px; --amplify-radii-large: 14px;
+}
+.widget .amplify-button--primary { min-height: 52px; font-weight: 600; border-radius: 12px; }
+/* The widget's stylesheet resets buttons (font: inherit) and the body's line height for the whole page */
+main, header { line-height: 1.55; }
+main :is(button, label, a) { font-weight: 600; }

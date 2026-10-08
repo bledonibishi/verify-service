@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import type { Response } from 'express';
 import { readFileSync } from 'fs';
 import { join, resolve } from 'path';
-import { LIVENESS_HTML, LIVENESS_JS, VERIFY_CSS, VERIFY_HTML, VERIFY_JS } from './page';
+import { LIVENESS_HTML, LIVENESS_JS, VERIFY_HTML, VERIFY_JS } from './page';
 
 const STRICT =
   "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; form-action 'none'; base-uri 'none'";
@@ -26,7 +26,7 @@ const livenessPolicy = (region: string) =>
  */
 @Controller('verify')
 export class HostedController {
-  private readonly widget = new Map<string, Buffer>();
+  private readonly widget = new Map<string, Buffer>(); // built files, by path
 
   constructor(private readonly config: ConfigService) {}
 
@@ -59,22 +59,27 @@ export class HostedController {
   }
 
   /**
-   * The built widget (pnpm build / build:liveness). Kept in memory once found; a missing file is
-   * looked for again on the next request, so building the widget after the service started works
-   * without a restart. Missing files answer 404 and the face check page offers the selfie instead.
+   * A file produced by pnpm build (the page styles, the face check widget). Kept in memory once
+   * found; a missing file is looked for again on the next request, so building after the service
+   * started works without a restart.
    */
-  private widgetFile(name: string): Buffer {
-    const path = join(resolve(this.config.get<string>('LIVENESS_WIDGET_DIR') || 'liveness-dist'), name);
+  private builtFile(dirSetting: string, defaultDir: string, name: string, missing: string): Buffer {
+    const path = join(resolve(this.config.get<string>(dirSetting) || defaultDir), name);
     const cached = this.widget.get(path);
     if (cached) return cached;
     let data: Buffer;
     try {
       data = readFileSync(path);
     } catch {
-      throw new NotFoundException('The face check is not installed on this server');
+      throw new NotFoundException(missing);
     }
     this.widget.set(path, data);
     return data;
+  }
+
+  /** The widget's files; missing ones answer 404 and the face check page offers the selfie instead. */
+  private widgetFile(name: string): Buffer {
+    return this.builtFile('LIVENESS_WIDGET_DIR', 'liveness-dist', name, 'The face check is not installed on this server');
   }
 
   @Get()
@@ -87,9 +92,10 @@ export class HostedController {
     res.set(this.headers('text/javascript; charset=utf-8')).send(VERIFY_JS);
   }
 
+  // Built by Tailwind (pnpm build): the same for everyone, so revalidated rather than re-sent
   @Get('app.css')
   css(@Res() res: Response) {
-    res.set(this.headers('text/css; charset=utf-8')).send(VERIFY_CSS);
+    res.set({ ...this.headers('text/css; charset=utf-8'), 'Cache-Control': 'no-cache' }).send(this.builtFile('HOSTED_ASSETS_DIR', 'hosted-dist', 'app.css', 'The page styles are not built on this server'));
   }
 
   @Get('liveness')
