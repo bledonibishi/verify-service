@@ -1,8 +1,7 @@
-import { Controller, Get, NotFoundException, Res } from '@nestjs/common';
+import { Controller, Get, Res } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Response } from 'express';
-import { readFileSync, statSync } from 'fs';
-import { join, resolve } from 'path';
+import { builtFile } from './built-files';
 import { LIVENESS_HTML, LIVENESS_JS, VERIFY_HTML, VERIFY_JS } from './page';
 
 const STRICT =
@@ -26,7 +25,6 @@ const livenessPolicy = (region: string) =>
  */
 @Controller('verify')
 export class HostedController {
-  private readonly widget = new Map<string, { data: Buffer; mtime: number }>(); // built files, by path
 
   constructor(private readonly config: ConfigService) {}
 
@@ -58,30 +56,8 @@ export class HostedController {
     return /^[a-z]{2}(-[a-z]+)+-\d$/.test(r) ? r : 'eu-west-1';
   }
 
-  /**
-   * A file produced by pnpm build (the page styles, the face check widget). Kept in memory, but
-   * re-read when the file on disk changes (a cheap stat per request), so a rebuild shows up without
-   * restarting the service. A missing file is looked for again on the next request.
-   */
   private builtFile(dirSetting: string, defaultDir: string, name: string, missing: string): Buffer {
-    const path = join(resolve(this.config.get<string>(dirSetting) || defaultDir), name);
-    let mtime: number;
-    try {
-      mtime = statSync(path).mtimeMs;
-    } catch {
-      this.widget.delete(path);
-      throw new NotFoundException(missing);
-    }
-    const cached = this.widget.get(path);
-    if (cached && cached.mtime === mtime) return cached.data;
-    let data: Buffer;
-    try {
-      data = readFileSync(path);
-    } catch {
-      throw new NotFoundException(missing);
-    }
-    this.widget.set(path, { data, mtime });
-    return data;
+    return builtFile(this.config.get<string>(dirSetting) || defaultDir, name, missing);
   }
 
   /** The widget's files; missing ones answer 404 and the face check page offers the selfie instead. */
