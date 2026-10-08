@@ -6,7 +6,8 @@
  *
  * Run it with the same storage settings as the service (for a local run: STORAGE_DRIVER=local
  * STORAGE_KEY_PROVIDER=env in front, as when starting the service). Prints only pass/fail per check,
- * issue codes and, with --shape / --variants, the OCR text's shape (digits as 9, letters as A):
+ * issue codes, how the provided name and birth date differ from the card (word counts, look-alike
+ * letters; never the names themselves) and, with --shape / --variants, the OCR text's shape (digits as 9, letters as A):
  * safe to paste into a chat or issue. Needs tesseract.
  */
 import { DocumentKind, PrismaClient } from '@prisma/client';
@@ -31,13 +32,21 @@ async function main() {
   const prisma = new PrismaClient();
   try {
     const doc = await prisma.document.findFirst({ where: { sessionId, kind: DocumentKind.ID_BACK }, select: { storageKey: true } });
+    const expected = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { expectedFirstName: true, expectedLastName: true, expectedBirthDate: true },
+    });
     if (!doc) {
       console.log('No ID back stored for that session (never uploaded, or already deleted by retention)');
       return 1;
     }
     const storage = new StorageService({ get: (k: string) => process.env[k] } as never);
     const image = await storage.get(doc.storageKey);
-    return await checkImage(image, flags);
+    return await checkImage(image, flags, {
+      firstName: expected?.expectedFirstName,
+      lastName: expected?.expectedLastName,
+      birthDate: expected?.expectedBirthDate,
+    });
   } finally {
     await prisma.$disconnect();
   }

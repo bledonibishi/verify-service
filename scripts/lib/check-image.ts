@@ -6,12 +6,13 @@
 import { cleanMrzText, readKosovoMrz } from '../../src/documents/mrz';
 import { mrzVariants } from '../../src/ocr/mrz-image';
 import { TesseractProvider } from '../../src/ocr/tesseract.provider';
+import { describeNameDiff } from './name-diff';
 
 const shape = (t: string) => t.replace(/[0-9]/g, '9').replace(/[A-Za-z]/g, 'A');
 const readable = (t: string) => readKosovoMrz(t)?.result.ok === true;
 
 /** Reads an ID-back image the way the service does and prints only pass/fail, codes and shapes. Returns the exit code. */
-export async function checkImage(image: Buffer, flags: string[]): Promise<number> {
+export async function checkImage(image: Buffer, flags: string[], expected: { firstName?: string | null; lastName?: string | null; birthDate?: string | null } = {}): Promise<number> {
   const engine = new TesseractProvider();
   const asUploaded = await engine.readText(image);
   const direct = readable(asUploaded.text);
@@ -26,6 +27,10 @@ export async function checkImage(image: Buffer, flags: string[]): Promise<number
     if (read.result.data) {
       console.log(`  document expired: ${read.result.data.expired ? 'yes' : 'no'}`);
       console.log(`  issuer RKS: ${read.result.data.issuingState === 'RKS' ? 'yes' : 'no'}`);
+      // How the provided details differ from the card, without showing either
+      if (expected.lastName) console.log(`  surname vs provided: ${describeNameDiff(expected.lastName, read.result.data.surname)}`);
+      if (expected.firstName) console.log(`  given names vs provided: ${describeNameDiff(expected.firstName, read.result.data.givenNames)}`);
+      if (expected.birthDate) console.log(`  birth date vs provided: ${expected.birthDate === read.result.data.birthDate ? 'same' : 'differs'}`);
     }
   }
   if (flags.includes('--variants')) {
