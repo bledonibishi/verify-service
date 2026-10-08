@@ -28,7 +28,7 @@ describe('mrzVariants', () => {
       expect(m.format).toBe('png');
       seen.push({ w: m.width!, h: m.height! });
     }
-    expect(seen.length).toBe(12);
+    expect(seen.length).toBe(18); // 6 bands x 3 treatments
     // the first variants are the shortest (bottom 35%), the last is the whole photo
     expect(seen[0].h).toBeLessThan(seen[seen.length - 1].h);
   });
@@ -78,6 +78,16 @@ describe('mrzVariants', () => {
 const haveTesseract = spawnSync('tesseract', ['--version']).status === 0;
 (haveTesseract ? describe : describe.skip)('reading a synthetic low-contrast card with the real engine', () => {
   // Only fictional data from testing.ts is rendered; skipped where tesseract is not installed
+  it('reads a card photographed small in the middle of a large photo', async () => {
+    const { TesseractProvider } = await import('./tesseract.provider');
+    const { mrzReadable } = await import('../verification/decision');
+    const card = await sharp(await renderCard({})).resize({ width: 520 }).toBuffer();
+    const photo = await sharp({ create: { width: 1200, height: 1600, channels: 3, background: '#2a2a2e' } }).composite([{ input: card, top: 560, left: 340 }]).jpeg().toBuffer();
+    const engine = new TesseractProvider();
+    const { text } = await engine.readText(photo, { accept: (t) => mrzReadable(t) });
+    expect(mrzReadable(text)).toBe(true);
+  }, 120_000);
+
   it('reads a grey, blurred photo that the unmodified image does not give', async () => {
     const { TesseractProvider } = await import('./tesseract.provider');
     const { mrzReadable } = await import('../verification/decision');

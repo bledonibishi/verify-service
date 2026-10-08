@@ -210,3 +210,18 @@ describe('review page: a case where the face check replaced the selfie', () => {
     expect(env.doc.querySelectorAll('img')).toHaveLength(2); // only the two ID photos
   });
 });
+
+
+describe('review page: issue labels', () => {
+  it('has a plain-English label for every issue code the service can produce', () => {
+    const { readFileSync } = require('fs');
+    const { join } = require('path');
+    const sources = ['src/documents/mrz/td1.ts', 'src/verification/decision.ts', 'src/documents/licence/check.ts'].map((f) => readFileSync(join(process.cwd(), f), 'utf8')).join('\n');
+    const codes = new Set<string>([...sources.matchAll(/'([A-Z][A-Z_]{4,})'/g)].map((m) => m[1]).filter((c) => c.includes('_')));
+    // Values that are not issue codes (statuses, field names, providers)
+    for (const notIssue of ['NEEDS_REVIEW', 'PIPELINE_ERROR_DONE']) codes.delete(notIssue);
+    const { APP_JS } = require('./ui');
+    const missing = [...codes].filter((c) => !new RegExp('\\b' + c + ':').test(APP_JS));
+    expect(missing).toEqual([]);
+  });
+});

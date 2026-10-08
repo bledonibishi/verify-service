@@ -96,7 +96,7 @@ describe('TesseractProvider tries cleaned-up images only when asked and only whe
     const f = flaky(1000);
     const r = await new TesseractProvider(f.bin).readText(await photo(), { accept: () => false });
     expect(r.text).toBe('BAD\n');
-    expect(f.runs()).toBeLessThanOrEqual(13);
+    expect(f.runs()).toBeLessThanOrEqual(19); // the photo as given, then at most 18 variants
   });
 
   it('stays within the total time budget even when the engine hangs on the variants', async () => {
