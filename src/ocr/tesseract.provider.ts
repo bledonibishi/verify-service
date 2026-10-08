@@ -45,10 +45,15 @@ export class TesseractProvider implements OcrProvider {
     const first = await this.run(image, args);
     const accept = options.accept;
     if (!accept || accept(first.text)) return first;
+    // What is handed back if nothing is accepted: the first reading worth keeping, else the first
+    let kept: OcrResult | null = options.fallback?.(first.text) ? first : null;
+    const keep = (r: OcrResult) => {
+      if (!kept && options.fallback?.(r.text)) kept = r;
+    };
 
     // The photo as given did not read. Try cleaned-up versions, and the photo turned a quarter at
     // a time (a card photographed sideways or upside down), within a time budget, and fall back to
-    // the first reading (which the caller will report as unreadable) if none works.
+    // the kept or first reading (which the caller may report as unreadable) if none works.
     let stopped = false;
     const attempt = async (candidate: Buffer): Promise<{ result: OcrResult; accepted: boolean } | null> => {
       const remaining = deadline - Date.now();
@@ -59,7 +64,9 @@ export class TesseractProvider implements OcrProvider {
       try {
         // A run never goes past the budget either, so the total is bounded, not just the start
         const result = await this.run(candidate, args, Math.min(this.timeoutMs, remaining));
-        return { result, accepted: accept(result.text) };
+        const accepted = accept(result.text);
+        if (!accepted) keep(result);
+        return { result, accepted };
       } catch (err) {
         if (err instanceof OcrUnavailableError) throw err;
         stopped = true; // a hung or failing engine: stop rather than stack up more waits
@@ -84,7 +91,7 @@ export class TesseractProvider implements OcrProvider {
         if (!photo) continue;
         const read = await attempt(photo);
         if (read?.accepted) return read.result;
-        if (stopped) return first;
+        if (stopped) return kept ?? first;
         const n = fillers(read?.result.text ?? '');
         if (n >= MRZ_FILLER_SIGNAL && n > most) [best, most] = [t, n];
       }
@@ -96,10 +103,10 @@ export class TesseractProvider implements OcrProvider {
       for await (const variant of mrzVariants(photo)) {
         const read = await attempt(variant);
         if (read?.accepted) return read.result;
-        if (stopped) return first;
+        if (stopped) return kept ?? first;
       }
     }
-    return first;
+    return kept ?? first;
   }
 
   private run(image: Buffer, args: string[], timeoutMs = this.timeoutMs): Promise<OcrResult> {

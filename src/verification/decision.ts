@@ -65,6 +65,32 @@ export function mrzReadable(ocrText: string, now = new Date()): boolean {
   return readKosovoMrz(ocrText, { now })?.result.ok === true;
 }
 
+/**
+ * How the OCR engine judges readings of an ID back. A reading is accepted when its check digits
+ * pass, unless a name is one letter away from the one provided: names have no check digit, and
+ * that is what one misread letter looks like (an I at the card's edge read as E). Then the engine
+ * keeps reading its other versions of the photo, within its time budget, for one that reads the
+ * name as provided; that reading must also agree with the first on every check-digit-protected
+ * field (the same card). If none does, the first readable reading is kept and a person compares the
+ * name. A clear mismatch is accepted at once: reading again would not change it.
+ */
+export function idBackJudge(expected: ExpectedIdentity, now = new Date()): { accept: (text: string) => boolean; fallback: (text: string) => boolean } {
+  let card: string | null = null;
+  const protectedFields = (d: Td1Data) => [d.documentNumber, d.birthDate, d.expiryDate, d.personalNumber, d.sex, d.issuingState].join('|');
+  return {
+    accept: (text) => {
+      const read = readKosovoMrz(text, { now });
+      if (!read?.result.ok || !read.result.data) return false;
+      const fields = protectedFields(read.result.data);
+      if (card === null) card = fields;
+      else if (fields !== card) return false;
+      const identity = compareIdentity(read.result.data, expected);
+      return identity.surname !== 'near_match' && identity.givenNames !== 'near_match';
+    },
+    fallback: (text) => mrzReadable(text, now),
+  };
+}
+
 /** Turns OCR text from the ID back into check results. */
 export function checkIdBack(ocrText: string, expected: ExpectedIdentity, now = new Date()): CheckOutcome {
   return readIdBack(ocrText, expected, now).outcome;

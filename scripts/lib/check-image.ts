@@ -6,6 +6,7 @@
 import { cleanMrzText, readKosovoMrz } from '../../src/documents/mrz';
 import { mrzVariants } from '../../src/ocr/mrz-image';
 import { TesseractProvider } from '../../src/ocr/tesseract.provider';
+import { idBackJudge } from '../../src/verification/decision';
 import { describeNameDiff } from './name-diff';
 
 const shape = (t: string) => t.replace(/[0-9]/g, '9').replace(/[A-Za-z]/g, 'A');
@@ -16,7 +17,9 @@ export async function checkImage(image: Buffer, flags: string[], expected: { fir
   const engine = new TesseractProvider();
   const asUploaded = await engine.readText(image);
   const direct = readable(asUploaded.text);
-  const final = direct ? asUploaded : await engine.readText(image, { accept: readable });
+  // The same judgement as the service, including reading again for a name one letter off
+  const judge = idBackJudge({ firstName: expected.firstName ?? undefined, lastName: expected.lastName ?? undefined, birthDate: expected.birthDate ?? undefined });
+  const final = direct && judge.accept(asUploaded.text) ? asUploaded : await engine.readText(image, judge);
   const read = readKosovoMrz(final.text);
   console.log(`photo as uploaded: ${direct ? 'MRZ read' : 'MRZ not read'}`);
   if (!direct) console.log(`with cleaned-up variants: ${read?.result.ok ? 'MRZ read' : 'MRZ not read'}`);

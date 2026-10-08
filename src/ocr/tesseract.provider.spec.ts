@@ -128,6 +128,12 @@ describe('TesseractProvider tries cleaned-up images only when asked and only whe
     expect(f.runs()).toBe(3);
   });
 
+  it('hands back the first reading worth keeping when nothing is accepted', async () => {
+    const f = flaky(2); // BAD, BAD, then GOOD every time
+    const r = await new TesseractProvider(f.bin).readText(await photo(), { accept: () => false, fallback: (t) => t.includes('GOOD') });
+    expect(r.text).toBe('GOOD\n');
+  });
+
   it('stays within the total time budget even when the engine hangs on the variants', async () => {
     const counter = join(dir3, 'slow-count');
     writeFileSync(counter, '');
