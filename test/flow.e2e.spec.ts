@@ -5,7 +5,7 @@ import { Test } from '@nestjs/testing';
 import { PrismaClient } from '@prisma/client';
 import { randomBytes, randomUUID } from 'crypto';
 import { createServer, Server } from 'http';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'fs';
 import { AddressInfo } from 'net';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -3669,6 +3669,11 @@ describe('verification flow (e2e)', () => {
         // built after the service started: found on the next request, no restart needed
         writeFileSync(join(dir, 'liveness-widget.css'), '.amplify-liveness{}');
         expect((await request(http()).get('/verify/liveness-widget.css').expect(200)).text).toContain('amplify-liveness');
+        // rebuilt while running: the new content is served, no restart needed
+        writeFileSync(join(dir, 'liveness-widget.css'), '.amplify-liveness-rebuilt{}');
+        const later = new Date(Date.now() + 5000);
+        utimesSync(join(dir, 'liveness-widget.css'), later, later);
+        expect((await request(http()).get('/verify/liveness-widget.css').expect(200)).text).toContain('amplify-liveness-rebuilt');
       } finally {
         if (original === undefined) delete process.env.LIVENESS_WIDGET_DIR;
         else process.env.LIVENESS_WIDGET_DIR = original;

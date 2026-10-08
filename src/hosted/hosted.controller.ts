@@ -1,7 +1,7 @@
 import { Controller, Get, NotFoundException, Res } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Response } from 'express';
-import { readFileSync } from 'fs';
+import { readFileSync, statSync } from 'fs';
 import { join, resolve } from 'path';
 import { LIVENESS_HTML, LIVENESS_JS, VERIFY_HTML, VERIFY_JS } from './page';
 
@@ -26,7 +26,7 @@ const livenessPolicy = (region: string) =>
  */
 @Controller('verify')
 export class HostedController {
-  private readonly widget = new Map<string, Buffer>(); // built files, by path
+  private readonly widget = new Map<string, { data: Buffer; mtime: number }>(); // built files, by path
 
   constructor(private readonly config: ConfigService) {}
 
@@ -59,21 +59,28 @@ export class HostedController {
   }
 
   /**
-   * A file produced by pnpm build (the page styles, the face check widget). Kept in memory once
-   * found; a missing file is looked for again on the next request, so building after the service
-   * started works without a restart.
+   * A file produced by pnpm build (the page styles, the face check widget). Kept in memory, but
+   * re-read when the file on disk changes (a cheap stat per request), so a rebuild shows up without
+   * restarting the service. A missing file is looked for again on the next request.
    */
   private builtFile(dirSetting: string, defaultDir: string, name: string, missing: string): Buffer {
     const path = join(resolve(this.config.get<string>(dirSetting) || defaultDir), name);
+    let mtime: number;
+    try {
+      mtime = statSync(path).mtimeMs;
+    } catch {
+      this.widget.delete(path);
+      throw new NotFoundException(missing);
+    }
     const cached = this.widget.get(path);
-    if (cached) return cached;
+    if (cached && cached.mtime === mtime) return cached.data;
     let data: Buffer;
     try {
       data = readFileSync(path);
     } catch {
       throw new NotFoundException(missing);
     }
-    this.widget.set(path, data);
+    this.widget.set(path, { data, mtime });
     return data;
   }
 
