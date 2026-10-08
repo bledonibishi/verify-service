@@ -10,7 +10,7 @@ import { FACE_PROVIDER, FaceProvider, FaceUnavailableError } from '../face/face-
 import { LIVENESS_PROVIDER, LivenessProvider, LivenessUnavailableError } from '../liveness/liveness-provider';
 import { checkLicence, LicenceOutcome } from '../documents/licence';
 import type { Td1Data } from '../documents/mrz';
-import { CheckOutcome, LivenessOutcome, bindFaceToLiveness, livenessOutcome, withLiveness, FaceOutcome, readIdBack, mrzReadable, decide, emptyOutcome, faceOutcome, withFace, withLicence } from './decision';
+import { CheckOutcome, LivenessOutcome, bindFaceToLiveness, livenessOutcome, withLiveness, FaceOutcome, readIdBack, idBackJudge, decide, emptyOutcome, faceOutcome, withFace, withLicence } from './decision';
 import { toSummary } from './summary';
 
 const MAX_ATTEMPTS = 3;
@@ -152,12 +152,13 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     } else {
       const image = await this.storage.get(back.storageKey);
       try {
-        const { text } = await this.ocr.readText(image, { accept: (t) => mrzReadable(t) });
-        const read = readIdBack(text, {
+        const expected = {
           firstName: session.expectedFirstName ?? undefined,
           lastName: session.expectedLastName ?? undefined,
           birthDate: session.expectedBirthDate ?? undefined,
-        });
+        };
+        const { text } = await this.ocr.readText(image, idBackJudge(expected));
+        const read = readIdBack(text, expected);
         mrz = read.outcome;
         idData = read.data;
       } catch (err) {
@@ -229,15 +230,16 @@ export class VerificationWorker implements OnApplicationBootstrap, OnModuleDestr
     const front = documents.find((d) => d.kind === DocumentKind.ID_FRONT);
     const selfie = documents.find((d) => d.kind === DocumentKind.SELFIE);
     const source = referenceImage ? 'liveness' : 'selfie';
-    if (!front || !selfie) {
-      return { face: null, missing: [...(front ? [] : ['ID_FRONT_MISSING']), ...(selfie ? [] : ['SELFIE_MISSING'])], source };
+    // The liveness image stands in for a selfie: a session that did the challenge needs no upload
+    if (!front || (!selfie && !referenceImage)) {
+      return { face: null, missing: [...(front ? [] : ['ID_FRONT_MISSING']), ...(selfie || referenceImage ? [] : ['SELFIE_MISSING'])], source };
     }
     try {
       // The image captured during the liveness challenge wins over the uploaded selfie, so the
       // match is against the person who actually passed liveness.
       const [idImage, selfieImage] = await Promise.all([
         this.storage.get(front.storageKey),
-        referenceImage ?? this.storage.get(selfie.storageKey),
+        referenceImage ?? this.storage.get(selfie!.storageKey),
       ]);
       return { face: faceOutcome(await this.face.compare(idImage, selfieImage), threshold), missing: [], source };
     } catch (err) {

@@ -53,9 +53,42 @@ const MISMATCH_CODE: Record<keyof IdentityComparison, string> = {
   birthDate: 'BIRTH_DATE_MISMATCH',
 };
 
+/** One letter apart: most likely an OCR misread (names have no check digit), still for a person to confirm. */
+const NEAR_MATCH_CODE: Record<keyof IdentityComparison, string> = {
+  surname: 'SURNAME_NEAR_MATCH',
+  givenNames: 'GIVEN_NAMES_NEAR_MATCH',
+  birthDate: 'BIRTH_DATE_MISMATCH', // dates are exact; never produced
+};
+
 /** True when the OCR text holds an MRZ whose check digits all pass; used to decide whether to try harder on the image. */
 export function mrzReadable(ocrText: string, now = new Date()): boolean {
   return readKosovoMrz(ocrText, { now })?.result.ok === true;
+}
+
+/**
+ * How the OCR engine judges readings of an ID back. A reading is accepted when its check digits
+ * pass, unless a name is one letter away from the one provided: names have no check digit, and
+ * that is what one misread letter looks like (an I at the card's edge read as E). Then the engine
+ * keeps reading its other versions of the photo, within its time budget, for one that reads the
+ * name as provided; that reading must also agree with the first on every check-digit-protected
+ * field (the same card). If none does, the first readable reading is kept and a person compares the
+ * name. A clear mismatch is accepted at once: reading again would not change it.
+ */
+export function idBackJudge(expected: ExpectedIdentity, now = new Date()): { accept: (text: string) => boolean; fallback: (text: string) => boolean } {
+  let card: string | null = null;
+  const protectedFields = (d: Td1Data) => [d.documentNumber, d.birthDate, d.expiryDate, d.personalNumber, d.sex, d.issuingState].join('|');
+  return {
+    accept: (text) => {
+      const read = readKosovoMrz(text, { now });
+      if (!read?.result.ok || !read.result.data) return false;
+      const fields = protectedFields(read.result.data);
+      if (card === null) card = fields;
+      else if (fields !== card) return false;
+      const identity = compareIdentity(read.result.data, expected);
+      return identity.surname !== 'near_match' && identity.givenNames !== 'near_match';
+    },
+    fallback: (text) => mrzReadable(text, now),
+  };
 }
 
 /** Turns OCR text from the ID back into check results. */
@@ -84,6 +117,7 @@ export function readIdBack(ocrText: string, expected: ExpectedIdentity, now = ne
   const identity = compareIdentity(result.data, expected);
   for (const key of Object.keys(identity) as (keyof IdentityComparison)[]) {
     if (identity[key] === 'mismatch') issueCodes.push(MISMATCH_CODE[key]);
+    if (identity[key] === 'near_match') issueCodes.push(NEAR_MATCH_CODE[key]);
     if (identity[key] === 'not_provided') issueCodes.push('EXPECTED_IDENTITY_MISSING');
   }
   if (result.data.expired) issueCodes.push('DOCUMENT_EXPIRED');

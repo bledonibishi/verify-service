@@ -2,7 +2,8 @@ export type DocumentKind = 'ID_FRONT' | 'ID_BACK' | 'SELFIE' | 'LICENCE_FRONT' |
 
 export type SessionStatus = 'PENDING' | 'PROCESSING' | 'APPROVED' | 'REJECTED' | 'NEEDS_REVIEW' | 'EXPIRED';
 
-export type Match = 'match' | 'mismatch' | 'not_provided' | 'unavailable';
+/** `near_match`: equal to the card but for one letter (likely misread); always left for a person to review. */
+export type Match = 'match' | 'near_match' | 'mismatch' | 'not_provided' | 'unavailable';
 
 export interface CreateSessionInput {
   /** Your own identifier for the person being verified. */
@@ -116,8 +117,10 @@ export interface UploadSessionInfo {
   /** In the order to ask for them. */
   steps: { kind: DocumentKind; required: boolean }[];
   uploaded: DocumentKind[];
-  /** Whether a liveness provider is configured. */
+  /** Whether a liveness provider is configured. When it is, the selfie is optional: the liveness challenge replaces it. */
   liveness: boolean;
+  /** Whether a liveness challenge has been started for this session (POST .../liveness). */
+  livenessStarted?: boolean;
 }
 
 export interface UsageSummary {

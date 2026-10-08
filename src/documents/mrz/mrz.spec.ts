@@ -3,6 +3,7 @@ import { compareIdentity, normalizeName } from './identity';
 import { extractTd1Lines, parseKosovoTd1, repairKosovoTd1 } from './repair';
 import { parseTd1 } from './td1';
 import { SAMPLE, buildTd1 } from './testing';
+import { checkIdBack, decide, idBackJudge } from '../../verification/decision';
 
 const NOW = new Date('2026-10-02T00:00:00Z');
 
@@ -275,6 +276,38 @@ describe('identity comparison', () => {
       givenNames: 'mismatch',
     });
     expect(compareIdentity(data, { lastName: '   ' }).surname).toBe('not_provided');
+  });
+
+  it('ignores case and accents, and calls one misread letter a near match, never a match', () => {
+    expect(compareIdentity(data, { lastName: 'KRASNIQI' }).surname).toBe('match');
+    expect(compareIdentity(data, { lastName: 'krasniqi' }).surname).toBe('match');
+    // one letter apart, same length: what a single OCR misread looks like
+    expect(compareIdentity(data, { lastName: 'Krasniqa' }).surname).toBe('near_match');
+    expect(compareIdentity(data, { firstName: 'Hana' }).givenNames).toBe('near_match');
+    // two letters, a different length, or a short name are not near
+    expect(compareIdentity(data, { lastName: 'Krasniaa' }).surname).toBe('mismatch');
+    expect(compareIdentity(data, { lastName: 'Krasniq' }).surname).toBe('mismatch');
+    expect(compareIdentity({ ...data, surname: 'ABC' }, { lastName: 'ABD' }).surname).toBe('mismatch');
+    // a near match never approves automatically and is reported for a person to look at
+    const out = checkIdBack(buildTd1({ ...SAMPLE, surname: 'KRASNIQI' }).join('\n'), { lastName: 'Krasniqa' }, NOW);
+    expect(out.issueCodes).toContain('SURNAME_NEAR_MATCH');
+    expect(out.issueCodes).not.toContain('SURNAME_MISMATCH');
+    expect(decide(out, true)).toBe('NEEDS_REVIEW');
+  });
+
+  it('keeps reading when a name is one letter off, and takes a reading of the same card that matches', () => {
+    const card = { ...SAMPLE, surname: 'IBRAHIMI' };
+    const misread = buildTd1({ ...card, surname: 'EBRAHIMI' }).join('\n'); // the I at the edge read as E
+    const right = buildTd1(card).join('\n');
+    const otherCard = buildTd1({ ...card, documentNumber: 'ID0000002' }).join('\n');
+    const judge = idBackJudge({ lastName: 'Ibrahimi' }, NOW);
+    expect(judge.accept(misread)).toBe(false); // near match: read again
+    expect(judge.fallback(misread)).toBe(true); // but worth keeping
+    expect(judge.accept(otherCard)).toBe(false); // a different card never confirms the name
+    expect(judge.accept(right)).toBe(true);
+    // a clear mismatch, or no name given, is accepted at once
+    expect(idBackJudge({ lastName: 'Gashi' }, NOW).accept(right)).toBe(true);
+    expect(idBackJudge({}, NOW).accept(misread)).toBe(true);
   });
 
   it('reports mismatches and omitted fields', () => {

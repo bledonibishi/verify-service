@@ -12,6 +12,11 @@ export interface OcrOptions {
    * accepted, cleaned-up versions of it are tried until one is. Without it the image is read once.
    */
   accept?: (text: string) => boolean;
+  /**
+   * MRZ mode only: a reading that is not accepted but worth keeping. When nothing is accepted, the
+   * first reading that passes this is returned rather than the first reading of all.
+   */
+  fallback?: (text: string) => boolean;
 }
 
 export interface OcrResult {

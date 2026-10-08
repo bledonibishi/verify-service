@@ -1,5 +1,7 @@
 import { spawnSync } from 'child_process';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, mkdtempSync, readFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { sameDatabase, testDatabaseUrl } from './test-database';
 
 /**
@@ -23,4 +25,11 @@ export default function globalSetup() {
     // Prisma's output names the database and the failing step, never data
     throw new Error(`Could not prepare the test database:\n${res.stdout}\n${res.stderr}`);
   }
+
+  // The hosted page's stylesheet is built by Tailwind; build it once for the tests, in a temporary
+  // folder, so the suite works without a prior pnpm build (workers inherit this environment)
+  const css = mkdtempSync(join(tmpdir(), 'verify-css-'));
+  const built = spawnSync('pnpm', ['exec', 'tailwindcss', '-i', 'src/hosted/tailwind.css', '-o', join(css, 'app.css'), '--minify'], { encoding: 'utf8' });
+  if (built.status !== 0) throw new Error(`Could not build the page styles:\n${built.stdout}\n${built.stderr}`);
+  process.env.HOSTED_ASSETS_DIR = css;
 }

@@ -1,7 +1,22 @@
 import { Controller, Get, Res } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Response } from 'express';
-import { VERIFY_CSS, VERIFY_HTML, VERIFY_JS } from './page';
+import { builtFile } from './built-files';
+import { LIVENESS_HTML, LIVENESS_JS, VERIFY_HTML, VERIFY_JS } from './page';
+
+const STRICT =
+  "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; form-action 'none'; base-uri 'none'";
+
+/**
+ * The face check page only. AWS Face Liveness needs WebAssembly (face detection in the browser),
+ * the camera stream, the detector's model from AWS's CDN and a WebSocket to Rekognition in the
+ * liveness region. Still no inline script or style, and no other origin.
+ */
+const livenessPolicy = (region: string) =>
+  "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; " +
+  "media-src 'self' blob: mediastream:; worker-src 'self' blob:; " +
+  `connect-src 'self' https://cdn.liveness.rekognition.amazonaws.com https://streaming-rekognition.${region}.amazonaws.com wss://streaming-rekognition.${region}.amazonaws.com; ` +
+  "form-action 'none'; base-uri 'none'";
 
 /**
  * No inline script or style, nothing from other origins. Photos preview from blob: URLs and the
@@ -10,9 +25,10 @@ import { VERIFY_CSS, VERIFY_HTML, VERIFY_JS } from './page';
  */
 @Controller('verify')
 export class HostedController {
+
   constructor(private readonly config: ConfigService) {}
 
-  private headers(contentType: string) {
+  private headers(contentType: string, policy = STRICT) {
     const ancestors = (this.config.get<string>('HOSTED_FRAME_ANCESTORS') ?? '').trim();
     // Only plain origins are accepted; anything else falls back to "no embedding"
     const safe = ancestors
@@ -21,9 +37,7 @@ export class HostedController {
       .join(' ');
     return {
       'Content-Type': contentType,
-      'Content-Security-Policy':
-        "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; connect-src 'self'; " +
-        `form-action 'none'; base-uri 'none'; frame-ancestors ${safe || "'none'"}`,
+      'Content-Security-Policy': `${policy}; frame-ancestors ${safe || "'none'"}`,
       'X-Content-Type-Options': 'nosniff',
       'Referrer-Policy': 'no-referrer',
       'Cache-Control': 'no-store',
@@ -36,6 +50,21 @@ export class HostedController {
     };
   }
 
+  /** Only a well-formed AWS region name goes into the policy header. */
+  private livenessRegion(): string {
+    const r = this.config.get<string>('LIVENESS_REGION') || 'eu-west-1';
+    return /^[a-z]{2}(-[a-z]+)+-\d$/.test(r) ? r : 'eu-west-1';
+  }
+
+  private builtFile(dirSetting: string, defaultDir: string, name: string, missing: string): Buffer {
+    return builtFile(this.config.get<string>(dirSetting) || defaultDir, name, missing);
+  }
+
+  /** The widget's files; missing ones answer 404 and the face check page offers the selfie instead. */
+  private widgetFile(name: string): Buffer {
+    return this.builtFile('LIVENESS_WIDGET_DIR', 'liveness-dist', name, 'The face check is not installed on this server');
+  }
+
   @Get()
   index(@Res() res: Response) {
     res.set(this.headers('text/html; charset=utf-8')).send(VERIFY_HTML);
@@ -46,8 +75,30 @@ export class HostedController {
     res.set(this.headers('text/javascript; charset=utf-8')).send(VERIFY_JS);
   }
 
+  // Built by Tailwind (pnpm build): the same for everyone, so revalidated rather than re-sent
   @Get('app.css')
   css(@Res() res: Response) {
-    res.set(this.headers('text/css; charset=utf-8')).send(VERIFY_CSS);
+    res.set({ ...this.headers('text/css; charset=utf-8'), 'Cache-Control': 'no-cache' }).send(this.builtFile('HOSTED_ASSETS_DIR', 'hosted-dist', 'app.css', 'The page styles are not built on this server'));
+  }
+
+  @Get('liveness')
+  liveness(@Res() res: Response) {
+    res.set(this.headers('text/html; charset=utf-8', livenessPolicy(this.livenessRegion()))).send(LIVENESS_HTML);
+  }
+
+  @Get('liveness.js')
+  livenessJs(@Res() res: Response) {
+    res.set(this.headers('text/javascript; charset=utf-8')).send(LIVENESS_JS);
+  }
+
+  // Large and the same for everyone: revalidated (ETag) rather than downloaded every time
+  @Get('liveness-widget.js')
+  widgetJs(@Res() res: Response) {
+    res.set({ ...this.headers('text/javascript; charset=utf-8'), 'Cache-Control': 'no-cache' }).send(this.widgetFile('liveness-widget.js'));
+  }
+
+  @Get('liveness-widget.css')
+  widgetCss(@Res() res: Response) {
+    res.set({ ...this.headers('text/css; charset=utf-8'), 'Cache-Control': 'no-cache' }).send(this.widgetFile('liveness-widget.css'));
   }
 }

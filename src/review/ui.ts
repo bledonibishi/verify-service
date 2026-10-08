@@ -1,6 +1,8 @@
 /**
- * The review UI: three static files served under /review. No framework, no inline script or
- * style (the CSP forbids both), and every value from the API is written with textContent.
+ * The review UI: static files served under /review. No framework, no inline script or style (the
+ * CSP forbids both), and every value from the API is written with textContent. Styled with
+ * Tailwind: the classes below are built, together with the hosted page's, into the stylesheet the
+ * service serves at /review/app.css (see src/hosted/tailwind.css).
  */
 export const INDEX_HTML = `<!doctype html>
 <html lang="en">
@@ -10,34 +12,17 @@ export const INDEX_HTML = `<!doctype html>
 <title>Verification review</title>
 <link rel="stylesheet" href="/review/app.css">
 </head>
-<body>
-<header><h1>Verification review</h1><div id="who" hidden><span id="who-name"></span> <button id="security" type="button">Security</button> <button id="logout" type="button">Sign out</button></div></header>
-<main id="app"></main>
+<body class="min-h-screen">
+<header class="sticky top-0 z-10 border-b border-line bg-card">
+<div class="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3">
+<h1 class="flex items-center gap-2 text-base font-bold tracking-tight"><svg class="size-6 text-accent" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 5-3 8.5-7 10-4-1.5-7-5-7-10V6z"/><path d="M9 12l2 2 4-4.5"/></svg>Verification review</h1>
+<div id="who" class="flex items-center gap-2" hidden><span id="who-name" class="hidden rounded-full bg-soft px-3 py-1 text-sm font-medium text-muted sm:inline"></span> <button id="security" class="cursor-pointer rounded-lg border border-line bg-card px-3 py-1.5 text-sm font-semibold hover:border-muted" type="button">Security</button> <button id="logout" class="cursor-pointer rounded-lg border border-line bg-card px-3 py-1.5 text-sm font-semibold hover:border-muted" type="button">Sign out</button></div>
+</div>
+</header>
+<main id="app" class="mx-auto max-w-6xl px-4 py-6"></main>
 <script src="/review/app.js"></script>
 </body>
 </html>`;
-
-export const APP_CSS = `
-:root{color-scheme:light dark;--bg:#f6f7f9;--fg:#15181d;--card:#fff;--line:#d9dde3;--muted:#5b6471;--accent:#1d4ed8;--ok:#15803d;--bad:#b91c1c;--warn:#a16207}
-@media (prefers-color-scheme:dark){:root{--bg:#111418;--fg:#e8eaee;--card:#1a1e24;--line:#2d333b;--muted:#9aa4b2;--accent:#6d9bff;--ok:#4ade80;--bad:#f87171;--warn:#fbbf24}}
-*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--fg)}
-header{display:flex;justify-content:space-between;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);background:var(--card)}
-h1{font-size:17px;margin:0}h2{font-size:16px;margin:0 0 8px}main{max-width:1100px;margin:0 auto;padding:16px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:16px;margin-bottom:16px}
-button{font:inherit;padding:8px 14px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer}
-button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}button.danger{background:var(--bad);color:#fff;border-color:var(--bad)}
-button:disabled{opacity:.5;cursor:default}
-input,textarea{font:inherit;width:100%;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
-label{display:block;margin:10px 0 4px;color:var(--muted);font-size:13px}
-table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line)}tr.row{cursor:pointer}tr.row:hover{background:var(--bg)}
-.tag{display:inline-block;padding:1px 8px;margin:1px 4px 1px 0;border-radius:10px;background:var(--bg);border:1px solid var(--line);font-size:12px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}.grid figure{margin:0}
-.grid img{width:100%;max-height:420px;object-fit:contain;border:1px solid var(--line);border-radius:6px;background:#000}
-figcaption{color:var(--muted);font-size:13px;margin-bottom:4px}.codes{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:6px;font-family:ui-monospace,monospace;font-size:15px;padding:10px;border:1px dashed var(--line);border-radius:6px;margin:8px 0}.secret{font-family:ui-monospace,monospace;word-break:break-all;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);margin:6px 0}.muted{color:var(--muted)}.err{color:var(--bad)}.login{max-width:380px;margin:40px auto}.sp{margin-top:12px}
-dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px;margin:0}dt{color:var(--muted)}dd{margin:0}
-.ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-@media (max-width:600px){main{padding:12px}}
-`;
 
 export const APP_JS = `
 (function () {
@@ -55,11 +40,26 @@ export const APP_JS = `
     OCR_UNAVAILABLE: 'Text recognition was unavailable',
     PIPELINE_ERROR: 'Automated checks failed repeatedly',
     SURNAME_MISMATCH: 'Surname differs from what was provided',
+    SURNAME_NEAR_MATCH: 'Surname differs by one letter, likely misread from the card: compare with the photo',
+    GIVEN_NAMES_NEAR_MATCH: 'Given name differs by one letter, likely misread from the card: compare with the photo',
     GIVEN_NAMES_MISMATCH: 'Given names differ from what was provided',
     BIRTH_DATE_MISMATCH: 'Date of birth differs from what was provided',
     EXPECTED_IDENTITY_MISSING: 'No name or date of birth was provided to compare',
     DOCUMENT_EXPIRED: 'Document is expired',
     CHECK_DIGIT_MISMATCH: 'A check digit in the machine-readable zone is wrong',
+    WRONG_LENGTH: 'The machine-readable zone lines have the wrong length',
+    INVALID_CHARACTERS: 'The machine-readable zone has characters it cannot contain',
+    INVALID_BIRTH_DATE: 'The date of birth in the machine-readable zone is not a real date',
+    INVALID_EXPIRY_DATE: 'The expiry date in the machine-readable zone is not a real date',
+    INVALID_SEX: 'The sex field in the machine-readable zone is not readable',
+    UNEXPECTED_DOCUMENT_TYPE: 'Not read as an identity card',
+    UNEXPECTED_ISSUER: 'Issuing country is not Kosovo',
+    UNEXPECTED_NATIONALITY: 'Nationality is not Kosovo',
+    DOCUMENT_NUMBER_FORMAT: 'Document number does not have the Kosovo format',
+    PERSONAL_NUMBER_FORMAT: 'Personal number does not have the Kosovo format',
+    INVALID_NAME: 'The name in the machine-readable zone is not readable',
+    GIVEN_NAMES_MISSING: 'No given names in the machine-readable zone',
+    MRZ_SHAPE_INVALID: 'The repaired machine-readable zone does not have the shape of a Kosovo card',
     OCR_REPAIRED: 'Characters had to be corrected after text recognition',
     OPTIONAL_DATA_PRESENT: 'Unexpected data in an optional field',
     FACE_BELOW_THRESHOLD: 'Selfie does not match the ID photo closely enough',
@@ -87,6 +87,108 @@ export const APP_JS = `
     LICENCE_GIVEN_NAMES_MISMATCH: 'Given names on the licence differ from the ID',
     LICENCE_BIRTH_DATE_MISMATCH: 'Date of birth on the licence differs from the ID'
   };
+  // Red: evidence against the person or the document. Everything else is amber: something to look at.
+  var SERIOUS = ['MRZ_NOT_FOUND', 'CHECK_DIGIT_MISMATCH', 'SURNAME_MISMATCH', 'GIVEN_NAMES_MISMATCH', 'BIRTH_DATE_MISMATCH',
+    'DOCUMENT_EXPIRED', 'FACE_BELOW_THRESHOLD', 'FACE_MULTIPLE_FACES', 'FACE_NOT_BOUND_TO_LIVENESS', 'LIVENESS_FAILED',
+    'PIPELINE_ERROR', 'LICENCE_EXPIRED', 'LICENCE_DATES_IMPLAUSIBLE', 'LICENCE_PERSONAL_NUMBER_MISMATCH',
+    'LICENCE_SURNAME_MISMATCH', 'LICENCE_GIVEN_NAMES_MISMATCH', 'LICENCE_BIRTH_DATE_MISMATCH'];
+  function serious(code) { return SERIOUS.indexOf(code) >= 0; }
+
+  // Tailwind classes, as whole literal strings so the build finds them
+  var C = {
+    h2: 'text-2xl font-bold tracking-tight',
+    h3: 'mb-3 text-base font-semibold',
+    card: 'rounded-2xl border border-line bg-card p-5 shadow-card sm:p-6',
+    muted: 'text-muted',
+    small: 'text-sm text-muted',
+    err: 'mt-3 text-sm font-medium text-bad empty:hidden',
+    label: 'mt-4 mb-1.5 block text-sm font-medium text-muted',
+    labelTop: 'mb-1.5 block text-sm font-medium text-muted',
+    input: 'w-full rounded-xl border border-line bg-bg px-3.5 py-2.5 text-fg placeholder:text-muted focus:border-accent focus:outline-2 focus:outline-offset-0 focus:outline-accent',
+    primary: 'inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl border border-accent bg-accent px-4 py-2.5 font-semibold text-on-accent hover:bg-accent-hover disabled:cursor-default disabled:opacity-50',
+    secondary: 'inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl border border-line bg-card px-4 py-2.5 font-semibold text-fg hover:border-muted disabled:cursor-default disabled:opacity-50',
+    approve: 'inline-flex min-h-12 flex-1 cursor-pointer items-center justify-center gap-2 rounded-xl border border-ok bg-ok px-4 py-3 font-semibold text-on-strong hover:opacity-90 disabled:cursor-default disabled:opacity-50 [&_svg]:size-5',
+    dangerSmall: 'inline-flex min-h-11 cursor-pointer items-center justify-center gap-2 rounded-xl border border-bad bg-bad px-4 py-2.5 font-semibold text-on-strong hover:opacity-90 disabled:cursor-default disabled:opacity-50',
+    danger: 'inline-flex min-h-12 flex-1 cursor-pointer items-center justify-center gap-2 rounded-xl border border-bad bg-bad px-4 py-3 font-semibold text-on-strong hover:opacity-90 disabled:cursor-default disabled:opacity-50 [&_svg]:size-5',
+    back: 'mb-4 inline-flex cursor-pointer items-center gap-1.5 rounded-lg px-1 py-1 text-sm font-semibold text-accent hover:underline [&_svg]:size-4',
+    chipBad: 'inline-flex items-center rounded-full bg-bad-weak px-2.5 py-0.5 text-xs font-semibold text-bad',
+    chipWarn: 'inline-flex items-center rounded-full bg-warn-weak px-2.5 py-0.5 text-xs font-semibold text-warn',
+    chipMuted: 'inline-flex items-center rounded-full border border-line bg-soft px-2.5 py-0.5 text-xs font-semibold text-muted',
+    stat: 'rounded-2xl border border-line bg-card px-3 py-3 shadow-card sm:px-5 sm:py-4',
+    statLabel: 'text-xs font-medium text-muted sm:text-sm',
+    statValue: 'mt-1 text-lg font-bold tracking-tight sm:text-2xl',
+    list: 'divide-y divide-line overflow-hidden rounded-2xl border border-line bg-card shadow-card',
+    item: 'flex items-center gap-4 px-5 py-4 text-fg no-underline hover:bg-soft focus-visible:bg-soft focus-visible:outline-none',
+    itemIcon: 'flex size-10 flex-none items-center justify-center rounded-full bg-accent-weak text-accent [&_svg]:size-5',
+    itemIconBad: 'flex size-10 flex-none items-center justify-center rounded-full bg-bad-weak text-bad [&_svg]:size-5',
+    chevron: 'flex-none text-muted [&_svg]:size-5',
+    empty: 'flex flex-col items-center rounded-2xl border border-line bg-card px-6 py-14 text-center shadow-card',
+    emptyIcon: 'mb-4 flex size-16 items-center justify-center rounded-full bg-ok-weak text-ok [&_svg]:size-8',
+    pillReview: 'inline-flex items-center gap-1.5 rounded-full bg-warn-weak px-3 py-1 text-sm font-semibold text-warn',
+    pillOk: 'inline-flex items-center gap-1.5 rounded-full bg-ok-weak px-3 py-1 text-sm font-semibold text-ok',
+    pillBad: 'inline-flex items-center gap-1.5 rounded-full bg-bad-weak px-3 py-1 text-sm font-semibold text-bad',
+    docs: 'grid gap-4 sm:grid-cols-2',
+    figure: 'm-0',
+    caption: 'mb-2 flex items-center justify-between text-sm font-semibold',
+    photo: 'block h-64 w-full rounded-xl border border-line bg-[#0b0f15] object-contain',
+    missing: 'flex h-64 items-center justify-center rounded-xl border border-dashed border-line bg-soft text-sm text-muted',
+    faceSlot: 'flex h-64 flex-col items-center justify-center gap-2 rounded-xl border border-line bg-soft px-4 text-center',
+    faceSlotIcon: 'mb-1 flex size-12 items-center justify-center rounded-full bg-accent-weak text-accent [&_svg]:size-6',
+    faceLineOk: 'text-sm font-semibold text-ok',
+    faceLineBad: 'text-sm font-semibold text-bad',
+    faceLineNone: 'text-sm font-semibold text-muted',
+    open: 'text-xs font-semibold text-accent hover:underline',
+    checkRow: 'flex items-start gap-3 py-2.5',
+    checkPass: 'mt-0.5 flex-none text-ok [&_svg]:size-5',
+    checkFail: 'mt-0.5 flex-none text-bad [&_svg]:size-5',
+    checkNone: 'mt-0.5 flex-none text-muted [&_svg]:size-5',
+    checkWarn: 'mt-0.5 flex-none text-warn [&_svg]:size-5',
+    checkLabel: 'flex-1',
+    checkValue: 'text-sm font-semibold',
+    bar: 'mt-2 h-1.5 w-full overflow-hidden rounded-full bg-soft',
+    barFillOk: 'block h-full rounded-full bg-ok',
+    barFillBad: 'block h-full rounded-full bg-bad',
+    dl: 'grid grid-cols-[max-content_1fr] gap-x-6 gap-y-2 text-sm',
+    dt: 'text-muted',
+    dd: 'm-0 font-medium',
+    textarea: 'w-full rounded-xl border border-line bg-bg px-3.5 py-2.5 text-fg focus:border-accent focus:outline-2 focus:outline-accent',
+    codes: 'my-3 grid grid-cols-2 gap-2 rounded-xl border border-dashed border-line p-3 font-mono text-sm sm:grid-cols-3',
+    secret: 'my-2 rounded-xl border border-line bg-soft p-3 font-mono text-sm break-all',
+    login: 'mx-auto mt-10 max-w-sm',
+    loginCard: 'rounded-2xl border border-line bg-card p-6 shadow-card sm:p-8',
+    loginIcon: 'mb-5 flex size-12 items-center justify-center rounded-2xl bg-accent-weak text-accent [&_svg]:size-7',
+    stack: 'mt-6 grid gap-3'
+  };
+
+  var ICONS = {
+    shield: [['path', { d: 'M12 3l7 3v5c0 5-3 8.5-7 10-4-1.5-7-5-7-10V6z' }]],
+    lock: [['rect', { x: 5, y: 10.5, width: 14, height: 9.5, rx: 2 }], ['path', { d: 'M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5' }]],
+    pass: [['circle', { cx: 12, cy: 12, r: 9 }], ['path', { d: 'M8 12.5l2.6 2.6L16 9.6' }]],
+    fail: [['circle', { cx: 12, cy: 12, r: 9 }], ['path', { d: 'M9 9l6 6M15 9l-6 6' }]],
+    none: [['circle', { cx: 12, cy: 12, r: 9 }], ['path', { d: 'M8.5 12h7' }]],
+    chevron: [['path', { d: 'M9 6l6 6-6 6' }]],
+    back: [['path', { d: 'M15 6l-6 6 6 6' }]],
+    doc: [['rect', { x: 3, y: 6, width: 18, height: 12, rx: 2.5 }], ['circle', { cx: 8.5, cy: 11, r: 1.8 }], ['path', { d: 'M13 10h4.5M13 13.5h3M6 15.5h5' }]],
+    alert: [['path', { d: 'M12 4l9 16H3z' }], ['path', { d: 'M12 10v4.5M12 17.2v.3' }]],
+    done: [['circle', { cx: 12, cy: 12, r: 9 }], ['path', { d: 'M8 12.5l2.6 2.6L16 9.6' }]],
+    check: [['path', { d: 'M5 12.5l4.5 4.5L19 7.5' }]],
+    cross: [['path', { d: 'M6 6l12 12M18 6L6 18' }]],
+    face: [['circle', { cx: 12, cy: 10, r: 4 }], ['path', { d: 'M4.5 20c1.6-3.2 4.3-4.8 7.5-4.8s5.9 1.6 7.5 4.8' }]]
+  };
+  function icon(name) {
+    var NS = 'http://www.w3.org/2000/svg';
+    var svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('fill', 'none'); svg.setAttribute('stroke', 'currentColor'); svg.setAttribute('stroke-width', '1.8');
+    svg.setAttribute('stroke-linecap', 'round'); svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true'); svg.setAttribute('focusable', 'false');
+    (ICONS[name] || []).forEach(function (part) {
+      var n = document.createElementNS(NS, part[0]);
+      Object.keys(part[1]).forEach(function (k) { n.setAttribute(k, String(part[1][k])); });
+      svg.appendChild(n);
+    });
+    return svg;
+  }
 
   function el(tag, props, children) {
     var n = document.createElement(tag);
@@ -100,6 +202,17 @@ export const APP_JS = `
     return n;
   }
   function clear() { while (app.firstChild) app.removeChild(app.firstChild); }
+  function chip(code) { return el('span', { class: serious(code) ? C.chipBad : code === 'NO_AUTOMATED_RESULT' ? C.chipMuted : C.chipWarn, text: ISSUES[code] || code }); }
+
+  // "3 hours ago", for scanning a queue; the exact time is shown next to it
+  function ago(iso) {
+    var s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 60) return 'just now';
+    if (s < 3600) return Math.round(s / 60) + ' min ago';
+    if (s < 86400) return Math.round(s / 3600) + ' h ago';
+    var d = Math.round(s / 86400);
+    return d === 1 ? 'yesterday' : d + ' days ago';
+  }
 
   // Thrown after the screen has already been replaced (signed out, or two-factor setup required): callers must not write into the old one
   var HANDLED = 'signed-out';
@@ -121,19 +234,25 @@ export const APP_JS = `
     });
   }
 
+  function field(id, label, type) {
+    return [el('label', { class: C.label, for: id, text: label }), el('input', { class: C.input, type: type, id: id, autocomplete: type === 'password' ? 'current-password' : type === 'email' ? 'username' : 'one-time-code' })];
+  }
+
   function showLogin(message) {
     nav();
     who.hidden = true;
     clear();
-    var email = el('input', { type: 'email', id: 'email', autocomplete: 'username', required: '' });
-    var pw = el('input', { type: 'password', id: 'password', autocomplete: 'current-password', required: '' });
-    var msg = el('p', { class: 'err', role: 'alert', text: message || '' });
-    var form = el('form', { class: 'card login' }, [
-      el('h2', { text: 'Sign in' }),
-      el('label', { for: 'email', text: 'Email' }), email,
-      el('label', { for: 'password', text: 'Password' }), pw,
+    var email = el('input', { class: C.input, type: 'email', id: 'email', autocomplete: 'username', required: '' });
+    var pw = el('input', { class: C.input, type: 'password', id: 'password', autocomplete: 'current-password', required: '' });
+    var msg = el('p', { class: C.err, role: 'alert', text: message || '' });
+    var form = el('form', { class: C.loginCard }, [
+      el('div', { class: C.loginIcon }, [icon('shield')]),
+      el('h2', { class: C.h2, text: 'Sign in' }),
+      el('p', { class: 'mt-1 ' + C.small, text: 'Review identity checks for your organisation.' }),
+      el('label', { class: C.label, for: 'email', text: 'Email' }), email,
+      el('label', { class: C.label, for: 'password', text: 'Password' }), pw,
       msg,
-      el('button', { class: 'primary', type: 'submit', text: 'Sign in' })
+      el('div', { class: C.stack }, [el('button', { class: C.primary, type: 'submit', text: 'Sign in' })])
     ]);
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
@@ -146,22 +265,25 @@ export const APP_JS = `
         })
         .catch(function () { msg.textContent = 'Invalid email or password.'; });
     });
-    app.appendChild(form);
+    app.appendChild(el('div', { class: C.login }, [form]));
   }
 
   function showSecondFactor(challenge, message) {
     nav();
     who.hidden = true;
     clear();
-    var code = el('input', { type: 'text', id: 'code', autocomplete: 'one-time-code', inputmode: 'text', required: '', maxlength: '32' });
-    var msg = el('p', { class: 'err', role: 'alert', text: message || '' });
-    var form = el('form', { class: 'card login' }, [
-      el('h2', { text: 'Two-factor sign-in' }),
-      el('p', { class: 'muted', text: 'Enter the 6-digit code from your authenticator app, or one of your recovery codes.' }),
-      el('label', { for: 'code', text: 'Code' }), code,
+    var code = el('input', { class: C.input + ' font-mono tracking-widest', type: 'text', id: 'code', autocomplete: 'one-time-code', inputmode: 'text', required: '', maxlength: '32' });
+    var msg = el('p', { class: C.err, role: 'alert', text: message || '' });
+    var form = el('form', { class: C.loginCard }, [
+      el('div', { class: C.loginIcon }, [icon('lock')]),
+      el('h2', { class: C.h2, text: 'Two-factor sign-in' }),
+      el('p', { class: 'mt-1 ' + C.small, text: 'Enter the 6-digit code from your authenticator app, or one of your recovery codes.' }),
+      el('label', { class: C.label, for: 'code', text: 'Code' }), code,
       msg,
-      el('button', { class: 'primary', type: 'submit', text: 'Verify' }),
-      el('button', { type: 'button', text: 'Back', onclick: function () { showLogin(); } })
+      el('div', { class: C.stack }, [
+        el('button', { class: C.primary, type: 'submit', text: 'Verify' }),
+        el('button', { class: C.secondary, type: 'button', text: 'Back', onclick: function () { showLogin(); } })
+      ])
     ]);
     form.addEventListener('submit', function (ev) {
       ev.preventDefault();
@@ -169,7 +291,7 @@ export const APP_JS = `
         .then(function () { start(); })
         .catch(function () { code.value = ''; msg.textContent = 'That code did not work, or it expired. Go back and sign in again if it keeps failing.'; });
     });
-    app.appendChild(form);
+    app.appendChild(el('div', { class: C.login }, [form]));
     code.focus();
   }
 
@@ -177,13 +299,12 @@ export const APP_JS = `
   function showSecurity(forced) {
     var my = nav();
     clear();
-    var card = el('div', { class: 'card' }, [el('h2', { text: 'Two-factor sign-in' })]);
-    var body = el('div', { class: 'muted', text: 'Loading…' });
+    if (!forced) app.appendChild(el('button', { class: C.back, type: 'button', onclick: function () { location.hash = '#/'; start(); } }, [icon('back'), el('span', { text: 'Back to queue' })]));
+    var card = el('div', { class: C.card + ' max-w-2xl' }, [el('h2', { class: C.h2 + ' mb-2', text: 'Two-factor sign-in' })]);
+    var body = el('div', { class: C.muted, text: 'Loading…' });
     card.appendChild(body);
-    if (!forced) app.appendChild(el('button', { text: '← Back to queue', onclick: function () { location.hash = '#/'; start(); } }));
     app.appendChild(card);
 
-    function field(id, label, type) { return [el('label', { for: id, text: label }), el('input', { type: type, id: id, autocomplete: type === 'password' ? 'current-password' : 'one-time-code' })]; }
     function value(id) { return document.getElementById(id).value; }
     function fail(msg, e) { msg.textContent = e && e.status === 401 ? 'The password or code was not right.' : e && e.status === 403 ? e.message : 'Something went wrong. Try again.'; }
 
@@ -191,8 +312,8 @@ export const APP_JS = `
       body.textContent = '';
       body.className = '';
       body.appendChild(el('p', { text: 'Two-factor sign-in is on. Save these recovery codes somewhere safe: each works once if you lose your phone. They are shown only now.' }));
-      body.appendChild(el('div', { class: 'codes' }, codes.map(function (c) { return el('span', { text: c }); })));
-      body.appendChild(el('button', { class: 'primary', type: 'button', text: 'I have saved them', onclick: function () { location.hash = '#/'; start(); } }));
+      body.appendChild(el('div', { class: C.codes }, codes.map(function (c) { return el('span', { text: c }); })));
+      body.appendChild(el('button', { class: C.primary, type: 'button', text: 'I have saved them', onclick: function () { location.hash = '#/'; start(); } }));
     }
 
     api('GET', '/2fa').then(function (st) {
@@ -201,41 +322,44 @@ export const APP_JS = `
       body.className = '';
       if (!st.enabled) {
         if (st.required) body.appendChild(el('p', { text: 'Your organisation requires two-factor sign-in. Set it up to continue.' }));
-        else body.appendChild(el('p', { class: 'muted', text: 'Adds a code from an authenticator app to your sign-in, so a stolen password is not enough.' }));
-        var msg = el('p', { class: 'err', role: 'alert' });
+        else body.appendChild(el('p', { class: C.muted, text: 'Adds a code from an authenticator app to your sign-in, so a stolen password is not enough.' }));
+        var msg = el('p', { class: C.err, role: 'alert' });
         var start1 = el('div', {}, field('pw1', 'Your password', 'password').concat([
-          el('button', { class: 'primary', type: 'button', text: 'Set up', onclick: function () {
+          el('div', { class: 'mt-4' }, [el('button', { class: C.primary, type: 'button', text: 'Set up', onclick: function () {
             msg.textContent = '';
             api('POST', '/2fa/setup', { password: value('pw1') }).then(function (s) {
               if (my !== gen) return;
               start1.remove();
-              body.appendChild(el('p', { text: 'In your authenticator app, add an account using this setup key (choose "enter a setup key", time-based):' }));
-              body.appendChild(el('div', { class: 'secret', text: s.secret }));
-              body.appendChild(el('p', { class: 'muted', text: 'Then enter the 6-digit code it shows to confirm.' }));
-              var m2 = el('p', { class: 'err', role: 'alert' });
+              body.appendChild(el('p', { class: 'mt-2', text: 'In your authenticator app, add an account using this setup key (choose "enter a setup key", time-based):' }));
+              body.appendChild(el('div', { class: C.secret, text: s.secret }));
+              body.appendChild(el('p', { class: C.small, text: 'Then enter the 6-digit code it shows to confirm.' }));
+              var m2 = el('p', { class: C.err, role: 'alert' });
               var confirm = el('div', {}, field('code1', 'Code', 'text').concat([
-                el('button', { class: 'primary', type: 'button', text: 'Turn on', onclick: function () {
+                el('div', { class: 'mt-4' }, [el('button', { class: C.primary, type: 'button', text: 'Turn on', onclick: function () {
                   m2.textContent = '';
                   api('POST', '/2fa/enable', { code: value('code1') }).then(function (r) { if (my === gen) showCodes(r.recoveryCodes); }).catch(function (e) { fail(m2, e); });
-                } }), m2
+                } })]), m2
               ]));
               body.appendChild(confirm);
             }).catch(function (e) { fail(msg, e); });
-          } }), msg
+          } })]), msg
         ]));
         body.appendChild(start1);
       } else {
         body.appendChild(el('p', { text: 'Two-factor sign-in is on. Recovery codes left: ' + st.recoveryCodesLeft + '.' }));
-        var m3 = el('p', { class: 'err', role: 'alert' });
+        var m3 = el('p', { class: C.err, role: 'alert' });
         var manage = el('div', {}, field('pw2', 'Your password', 'password').concat(field('code2', 'Current code (or a recovery code)', 'text'), [
-          el('button', { type: 'button', text: 'Get new recovery codes', onclick: function () {
-            m3.textContent = '';
-            api('POST', '/2fa/recovery-codes', { password: value('pw2'), code: value('code2') }).then(function (r) { if (my === gen) showCodes(r.recoveryCodes); }).catch(function (e) { fail(m3, e); });
-          } }),
-          st.required ? el('p', { class: 'muted', text: 'Your organisation requires two-factor sign-in, so it cannot be turned off.' }) : el('button', { class: 'danger', type: 'button', text: 'Turn off', onclick: function () {
-            m3.textContent = '';
-            api('POST', '/2fa/disable', { password: value('pw2'), code: value('code2') }).then(function () { if (my === gen) showSecurity(false); }).catch(function (e) { fail(m3, e); });
-          } }),
+          el('div', { class: 'mt-4 flex flex-wrap gap-2' }, [
+            el('button', { class: C.secondary, type: 'button', text: 'Get new recovery codes', onclick: function () {
+              m3.textContent = '';
+              api('POST', '/2fa/recovery-codes', { password: value('pw2'), code: value('code2') }).then(function (r) { if (my === gen) showCodes(r.recoveryCodes); }).catch(function (e) { fail(m3, e); });
+            } }),
+            st.required ? null : el('button', { class: C.dangerSmall, type: 'button', text: 'Turn off', onclick: function () {
+              m3.textContent = '';
+              api('POST', '/2fa/disable', { password: value('pw2'), code: value('code2') }).then(function () { if (my === gen) showSecurity(false); }).catch(function (e) { fail(m3, e); });
+            } })
+          ]),
+          st.required ? el('p', { class: 'mt-3 ' + C.small, text: 'Your organisation requires two-factor sign-in, so it cannot be turned off.' }) : null,
           m3
         ]));
         body.appendChild(manage);
@@ -246,107 +370,219 @@ export const APP_JS = `
   function showQueue() {
     var my = nav();
     clear();
-    var card = el('div', { class: 'card' }, [el('h2', { text: 'Waiting for review' })]);
-    var body = el('div', { class: 'muted', text: 'Loading…' });
-    card.appendChild(body);
-    app.appendChild(card);
+    var count = el('span', { class: C.chipMuted });
+    var head = el('div', { class: 'mb-5 flex items-center gap-3' }, [el('h2', { class: C.h2, text: 'Waiting for review' }), count]);
+    var stats = el('div', { class: 'mb-5 grid grid-cols-3 gap-2 sm:gap-3', hidden: '' });
+    var body = el('div', { class: C.muted, text: 'Loading…' });
+    app.appendChild(head);
+    app.appendChild(stats);
+    app.appendChild(body);
+    var shown = [];
+    var hasMore = false;
     load(null);
+
+    function stat(label, value) { return el('div', { class: C.stat }, [el('div', { class: C.statLabel, text: label }), el('div', { class: C.statValue, text: value })]); }
+    function summarise() {
+      while (stats.firstChild) stats.removeChild(stats.firstChild);
+      var oldest = shown.reduce(function (a, s) { return !a || s.createdAt < a ? s.createdAt : a; }, null);
+      var flagged = shown.filter(function (s) { return s.issues.some(serious); }).length;
+      count.textContent = shown.length + (hasMore ? '+' : '');
+      stats.appendChild(stat('Waiting', shown.length + (hasMore ? '+' : '')));
+      stats.appendChild(stat('Oldest waiting', oldest ? ago(oldest) : '–'));
+      stats.appendChild(stat('With serious issues', String(flagged)));
+      stats.hidden = false;
+    }
 
     function load(cursor) {
       api('GET', '/sessions' + (cursor ? '?cursor=' + encodeURIComponent(cursor) : '')).then(function (data) {
         if (my !== gen) return;
-        if (!cursor) body.textContent = '';
-        if (!data.items.length && !cursor) { body.textContent = 'Nothing is waiting for review.'; return; }
-        var table = body.querySelector('table');
-        if (!table) {
-          table = el('table', {}, [el('thead', {}, [el('tr', {}, ['Reference', 'Submitted', 'Why it needs review'].map(function (h) { return el('th', { text: h }); }))]), el('tbody')]);
-          body.appendChild(table);
+        if (!cursor) { body.textContent = ''; body.className = ''; }
+        if (!data.items.length && !cursor) {
+          count.textContent = '0';
+          body.appendChild(el('div', { class: C.empty }, [
+            el('div', { class: C.emptyIcon }, [icon('done')]),
+            el('p', { class: 'text-lg font-semibold', text: 'All caught up' }),
+            el('p', { class: 'mt-1 ' + C.muted, text: 'Nothing is waiting for review.' })
+          ]));
+          return;
         }
+        var list = body.querySelector('[data-list]');
+        if (!list) { list = el('div', { class: C.list, 'data-list': '' }); body.appendChild(list); }
         data.items.forEach(function (s) {
-          var tags = el('td');
-          (s.issues.length ? s.issues : ['NO_AUTOMATED_RESULT']).forEach(function (c) { tags.appendChild(el('span', { class: 'tag', text: ISSUES[c] || c })); });
-          var row = el('tr', { class: 'row', tabindex: '0' }, [el('td', { text: s.externalRef }), el('td', { text: new Date(s.createdAt).toLocaleString() }), tags]);
-          var open = function () { location.hash = '#/s/' + s.id; };
-          row.addEventListener('click', open);
-          row.addEventListener('keydown', function (e) { if (e.key === 'Enter') open(); });
-          table.querySelector('tbody').appendChild(row);
+          shown.push(s);
+          var codes = s.issues.length ? s.issues : ['NO_AUTOMATED_RESULT'];
+          var bad = codes.some(serious);
+          var chips = el('div', { class: 'mt-2 flex flex-wrap gap-1.5' }, codes.map(chip));
+          list.appendChild(el('a', { class: C.item, href: '#/s/' + s.id }, [
+            el('span', { class: bad ? C.itemIconBad : C.itemIcon }, [icon(bad ? 'alert' : 'doc')]),
+            el('div', { class: 'min-w-0 flex-1' }, [
+              el('div', { class: 'flex flex-wrap items-baseline gap-x-3' }, [
+                el('span', { class: 'font-semibold', text: s.externalRef }),
+                el('span', { class: C.small, text: ago(s.createdAt) + ' · ' + new Date(s.createdAt).toLocaleString() })
+              ]),
+              chips
+            ]),
+            el('span', { class: C.chevron }, [icon('chevron')])
+          ]));
         });
+        hasMore = !!data.nextCursor;
+        summarise();
         var more = body.querySelector('.more');
         if (more) more.remove();
-        if (data.nextCursor) body.appendChild(el('button', { class: 'more', text: 'Load more', onclick: function () { load(data.nextCursor); } }));
-      }).catch(function (e) { if (my === gen && e.message !== 'signed-out') body.textContent = 'Could not load the queue.'; });
+        if (data.nextCursor) body.appendChild(el('div', { class: 'more mt-4 text-center' }, [el('button', { class: C.secondary, type: 'button', text: 'Load more', onclick: function () { load(data.nextCursor); } })]));
+      }).catch(function (e) { if (my === gen && e.message !== 'signed-out') { body.className = C.err; body.textContent = 'Could not load the queue.'; } });
     }
   }
 
-  function yesNo(v) { return v === true ? ['yes', 'ok'] : v === false ? ['no', 'bad'] : ['not checked', 'muted']; }
-  function row(dl, k, v, cls) { dl.appendChild(el('dt', { text: k })); dl.appendChild(el('dd', { text: v, class: cls || '' })); }
+  // One line of the checks list: pass, fail, warn (for a person to look at) or not checked, with an optional score bar
+  function check(label, state, value, score) {
+    var mark = el('span', { class: state === 'pass' ? C.checkPass : state === 'fail' ? C.checkFail : state === 'warn' ? C.checkWarn : C.checkNone },
+      [icon(state === 'pass' ? 'pass' : state === 'fail' ? 'fail' : state === 'warn' ? 'alert' : 'none')]);
+    var right = el('div', { class: C.checkLabel }, [
+      el('div', { class: 'flex items-baseline justify-between gap-3' }, [
+        el('span', { text: label }),
+        el('span', { class: C.checkValue + ' ' + (state === 'pass' ? 'text-ok' : state === 'fail' ? 'text-bad' : state === 'warn' ? 'text-warn' : 'text-muted'), text: value })
+      ])
+    ]);
+    if (typeof score === 'number') {
+      var fill = el('span', { class: state === 'fail' ? C.barFillBad : C.barFillOk });
+      fill.style.width = Math.max(2, Math.min(100, score)) + '%'; // set through the DOM, not a style attribute (the CSP blocks those)
+      right.appendChild(el('div', { class: C.bar }, [fill]));
+    }
+    return el('div', { class: C.checkRow }, [mark, right]);
+  }
+  // The face check replaced the selfie and its image is not kept: show what it found instead of an empty box
+  function faceCheckSlot(v) {
+    var l = v.liveness, f = v.face;
+    var live = l.status ? (l.status === 'live' ? 'Live' : l.status.replace(/_/g, ' ')) + (l.confidence !== null ? ' ' + l.confidence.toFixed(1) + '%' : '') : 'not checked';
+    var face = f.status ? (f.status === 'match' ? 'Match' : f.status.replace(/_/g, ' ')) + (f.similarity !== null ? ' ' + f.similarity.toFixed(1) + '%' : '') : 'not checked';
+    return el('figure', { class: C.figure }, [
+      el('figcaption', { class: C.caption, text: 'Face check' }),
+      el('div', { class: C.faceSlot }, [
+        el('div', { class: C.faceSlotIcon }, [icon('face')]),
+        el('p', { class: l.status === 'live' ? C.faceLineOk : l.status ? C.faceLineBad : C.faceLineNone, text: 'Liveness: ' + live }),
+        el('p', { class: f.status === 'match' ? C.faceLineOk : f.status ? C.faceLineBad : C.faceLineNone, text: 'Face match with the ID photo: ' + face }),
+        el('p', { class: C.small, text: 'The face image from the check is not kept.' })
+      ])
+    ]);
+  }
+
+  function bool(v, good) { return v === null || v === undefined ? 'none' : v === good ? 'pass' : 'fail'; }
+  function match(m) { return m === 'match' ? ['pass', 'Matches'] : m === 'near_match' ? ['warn', 'One letter differs'] : m === 'mismatch' ? ['fail', 'Does not match'] : m === 'not_provided' ? ['none', 'Not provided'] : ['none', 'Not checked']; }
 
   function showDetail(id) {
     var my = nav();
     clear();
-    var back = el('button', { text: '← Back to queue', onclick: function () { location.hash = '#/'; } });
-    app.appendChild(back);
-    var holder = el('div', { class: 'muted', text: 'Loading…' });
+    app.appendChild(el('button', { class: C.back, type: 'button', onclick: function () { location.hash = '#/'; } }, [icon('back'), el('span', { text: 'Back to queue' })]));
+    var holder = el('div', { class: C.muted, text: 'Loading…' });
     app.appendChild(holder);
     api('GET', '/sessions/' + encodeURIComponent(id)).then(function (s) {
       if (my !== gen) return;
       holder.remove();
+      var v = s.verification;
+      var issues = v ? v.issues : [];
+      var nBad = issues.filter(serious).length;
+
+      // Header: who, when, where the case stands
+      var pill = s.status === 'NEEDS_REVIEW' ? el('span', { class: C.pillReview, text: 'Needs review' })
+        : s.status === 'APPROVED' ? el('span', { class: C.pillOk, text: 'Approved' })
+        : s.status === 'REJECTED' ? el('span', { class: C.pillBad, text: 'Rejected' })
+        : el('span', { class: C.chipMuted, text: s.status.toLowerCase().replace('_', ' ') });
+      app.appendChild(el('div', { class: C.card + ' mb-6' }, [
+        el('div', { class: 'flex flex-wrap items-start justify-between gap-3' }, [
+          el('div', {}, [
+            el('h2', { class: C.h2, text: s.externalRef }),
+            el('p', { class: 'mt-1 ' + C.small, text: 'Submitted ' + ago(s.createdAt) + ' · ' + new Date(s.createdAt).toLocaleString() })
+          ]),
+          pill
+        ]),
+        issues.length
+          ? el('p', { class: 'mt-3 text-sm font-medium ' + (nBad ? 'text-bad' : 'text-warn'), text: nBad ? nBad + ' serious issue' + (nBad > 1 ? 's' : '') + ' found' + (issues.length > nBad ? ', and ' + (issues.length - nBad) + ' to look at' : '') : issues.length + ' thing' + (issues.length > 1 ? 's' : '') + ' to look at' })
+          : el('p', { class: 'mt-3 text-sm font-medium text-ok', text: v ? 'All automated checks passed.' : 'No automated result is available.' })
+      ]));
+
+      var grid = el('div', { class: 'grid items-start gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)]' });
+      app.appendChild(grid);
+      var left = el('div', { class: 'grid gap-6' });
+      var right = el('div', { class: 'grid gap-6 lg:sticky lg:top-20' });
+      grid.appendChild(left);
+      grid.appendChild(right);
+
+      // Documents
       var base = '/review/api/sessions/' + encodeURIComponent(s.id) + '/documents/';
       var kinds = ['ID_FRONT', 'ID_BACK', 'SELFIE'].concat(['LICENCE_FRONT', 'LICENCE_BACK'].filter(function (k) { return s.documents.indexOf(k) >= 0; }));
+      var NAMES = { ID_FRONT: 'ID front', ID_BACK: 'ID back', SELFIE: 'Selfie', LICENCE_FRONT: 'Licence front', LICENCE_BACK: 'Licence back' };
       var figs = kinds.map(function (k) {
-        if (s.documents.indexOf(k) < 0) return el('figure', {}, [el('figcaption', { text: k.replace('_', ' ') + ' — not uploaded' })]);
-        return el('figure', {}, [el('figcaption', { text: k.replace('_', ' ') }), el('img', { src: base + k, alt: k.replace('_', ' ') + ' photo' })]);
+        if (k === 'SELFIE' && s.documents.indexOf(k) < 0 && v && (v.face.source === 'liveness' || v.liveness.status)) return faceCheckSlot(v);
+        if (s.documents.indexOf(k) < 0) return el('figure', { class: C.figure }, [el('figcaption', { class: C.caption, text: NAMES[k] }), el('div', { class: C.missing, text: 'Not uploaded' })]);
+        return el('figure', { class: C.figure }, [
+          el('figcaption', { class: C.caption }, [el('span', { text: NAMES[k] }), el('a', { class: C.open, href: base + k, target: '_blank', rel: 'noopener', text: 'Open full size' })]),
+          el('img', { class: C.photo, src: base + k, alt: NAMES[k] + ' photo' })
+        ]);
       });
-      app.appendChild(el('div', { class: 'card' }, [el('h2', { text: 'Documents' }), el('div', { class: 'grid' }, figs)]));
+      left.appendChild(el('section', { class: C.card }, [el('h3', { class: C.h3, text: 'Documents' }), el('div', { class: C.docs }, figs)]));
 
-      var exp = el('dl');
-      row(exp, 'Reference', s.externalRef);
-      row(exp, 'First name', s.expected.firstName || 'not provided', s.expected.firstName ? '' : 'muted');
-      row(exp, 'Last name', s.expected.lastName || 'not provided', s.expected.lastName ? '' : 'muted');
-      row(exp, 'Date of birth', s.expected.birthDate || 'not provided', s.expected.birthDate ? '' : 'muted');
-      app.appendChild(el('div', { class: 'card' }, [el('h2', { text: 'What was provided' }), exp]));
+      // What the company sent, to compare against the photos
+      var exp = el('dl', { class: C.dl });
+      function pair(k, val) { exp.appendChild(el('dt', { class: C.dt, text: k })); exp.appendChild(el('dd', { class: C.dd + (val ? '' : ' text-muted'), text: val || 'not provided' })); }
+      pair('Reference', s.externalRef);
+      pair('First name', s.expected.firstName);
+      pair('Last name', s.expected.lastName);
+      pair('Date of birth', s.expected.birthDate);
+      left.appendChild(el('section', { class: C.card }, [el('h3', { class: C.h3, text: 'What was provided' }), exp]));
 
-      var v = s.verification;
-      var res = el('div', { class: 'card' }, [el('h2', { text: 'Automated checks' })]);
-      if (!v) res.appendChild(el('p', { class: 'muted', text: 'No automated result is available.' }));
+      // Automated checks
+      var checks = el('section', { class: C.card }, [el('h3', { class: C.h3, text: 'Automated checks' })]);
+      if (!v) checks.appendChild(el('p', { class: C.muted, text: 'No automated result is available.' }));
       else {
-        var dl = el('dl');
-        row(dl, 'ID text found', yesNo(v.mrz.found)[0], yesNo(v.mrz.found)[1]);
-        row(dl, 'ID check digits valid', yesNo(v.mrz.valid)[0], yesNo(v.mrz.valid)[1]);
-        row(dl, 'Surname matches', v.identity.surname || 'not checked');
-        row(dl, 'Given names match', v.identity.givenNames || 'not checked');
-        row(dl, 'Date of birth matches', v.identity.birthDate || 'not checked');
-        row(dl, 'Expired', v.expired === null ? 'not checked' : v.expired ? 'yes' : 'no', v.expired ? 'bad' : '');
-        row(dl, 'Face match', v.face.status ? v.face.status + (v.face.similarity !== null ? ' (' + v.face.similarity.toFixed(1) + ')' : '') : 'not checked');
-        row(dl, 'Liveness', v.liveness.status ? v.liveness.status + (v.liveness.confidence !== null ? ' (' + v.liveness.confidence.toFixed(1) + ')' : '') : 'not checked');
+        var list = el('div', { class: 'divide-y divide-line' });
+        list.appendChild(check('ID text found', bool(v.mrz.found, true), v.mrz.found ? 'Yes' : 'No'));
+        // Without the text there were no check digits to test: not checked, not failed
+        list.appendChild(check('ID check digits valid', v.mrz.found ? bool(v.mrz.valid, true) : 'none', v.mrz.found ? (v.mrz.valid ? 'Yes' : 'No') : 'Not checked'));
+        var sn = match(v.identity.surname), gn = match(v.identity.givenNames), bd = match(v.identity.birthDate);
+        list.appendChild(check('Surname', sn[0], sn[1]));
+        list.appendChild(check('Given names', gn[0], gn[1]));
+        list.appendChild(check('Date of birth', bd[0], bd[1]));
+        list.appendChild(check('Document expiry', bool(v.expired, false), v.expired === null ? 'Not checked' : v.expired ? 'Expired' : 'Valid'));
+        var f = v.face;
+        list.appendChild(check('Face match' + (f.source === 'liveness' ? ' (face check)' : f.source === 'selfie' ? ' (selfie)' : ''),
+          f.status === 'match' ? 'pass' : f.status ? 'fail' : 'none',
+          f.status ? (f.status === 'match' ? 'Match' : f.status.replace(/_/g, ' ')) + (f.similarity !== null ? ' · ' + f.similarity.toFixed(1) + '%' : '') : 'Not checked',
+          f.similarity !== null ? f.similarity : undefined));
+        var l = v.liveness;
+        list.appendChild(check('Liveness', l.status === 'live' ? 'pass' : l.status ? 'fail' : 'none',
+          l.status ? (l.status === 'live' ? 'Live' : l.status.replace(/_/g, ' ')) + (l.confidence !== null ? ' · ' + l.confidence.toFixed(1) + '%' : '') : 'Not checked',
+          l.confidence !== null ? l.confidence : undefined));
         if (v.licence) {
           var lc = v.licence;
-          row(dl, 'Licence fields read', lc.found ? 'all (' + lc.fields.join(', ') + ')' : (lc.fields.length ? 'only ' + lc.fields.join(', ') : 'none'), lc.found ? 'ok' : 'bad');
-          row(dl, 'Licence expired', lc.expired === null ? 'not checked' : lc.expired ? 'yes' : 'no', lc.expired ? 'bad' : '');
-          row(dl, 'Licence dates plausible', lc.datesValid === null ? 'not checked' : lc.datesValid ? 'yes' : 'no', lc.datesValid === false ? 'bad' : '');
-          row(dl, 'Licence personal number matches ID', lc.crossCheck.personalNumber || 'not checked');
-          row(dl, 'Licence surname matches ID', lc.crossCheck.surname || 'not checked');
-          row(dl, 'Licence given names match ID', lc.crossCheck.givenNames || 'not checked');
-          row(dl, 'Licence date of birth matches ID', lc.crossCheck.birthDate || 'not checked');
+          list.appendChild(check('Licence read', lc.found ? 'pass' : 'fail', lc.found ? 'All fields' : (lc.fields.length ? 'Only ' + lc.fields.join(', ') : 'Nothing')));
+          list.appendChild(check('Licence expiry', bool(lc.expired, false), lc.expired === null ? 'Not checked' : lc.expired ? 'Expired' : 'Valid'));
+          list.appendChild(check('Licence dates plausible', bool(lc.datesValid, true), lc.datesValid === null ? 'Not checked' : lc.datesValid ? 'Yes' : 'No'));
+          var pn = match(lc.crossCheck.personalNumber), ls = match(lc.crossCheck.surname), lg = match(lc.crossCheck.givenNames), lb = match(lc.crossCheck.birthDate);
+          list.appendChild(check('Licence personal number vs ID', pn[0], pn[1]));
+          list.appendChild(check('Licence surname vs ID', ls[0], ls[1]));
+          list.appendChild(check('Licence given names vs ID', lg[0], lg[1]));
+          list.appendChild(check('Licence date of birth vs ID', lb[0], lb[1]));
         }
-        res.appendChild(dl);
-        var tags = el('p');
-        v.issues.forEach(function (c) { tags.appendChild(el('span', { class: 'tag', text: ISSUES[c] || c })); });
-        res.appendChild(el('h2', { class: 'sp', text: 'Issues' }));
-        res.appendChild(v.issues.length ? tags : el('p', { class: 'muted', text: 'None.' }));
+        checks.appendChild(list);
+        if (issues.length) {
+          checks.appendChild(el('h3', { class: C.h3 + ' mt-5', text: 'Issues' }));
+          checks.appendChild(el('div', { class: 'flex flex-wrap gap-1.5' }, issues.map(chip)));
+        }
       }
-      app.appendChild(res);
+      right.appendChild(checks);
 
-      var box = el('div', { class: 'card' }, [el('h2', { text: 'Decision' })]);
+      // Decision
+      var box = el('section', { class: C.card }, [el('h3', { class: C.h3, text: 'Decision' })]);
       if (s.status !== 'NEEDS_REVIEW') {
         box.appendChild(el('p', { text: 'This session is ' + s.status.toLowerCase().replace('_', ' ') + '.' + (s.review && s.review.reason ? ' Reason: ' + s.review.reason : '') }));
       } else {
-        var reason = el('textarea', { id: 'reason', rows: '3', maxlength: '500' });
-        var msg = el('p', { class: 'err', role: 'alert' });
-        var approve = el('button', { class: 'primary', type: 'button', text: 'Approve' });
-        var reject = el('button', { class: 'danger', type: 'button', text: 'Reject' });
+        var reason = el('textarea', { class: C.textarea, id: 'reason', rows: '3', maxlength: '500', placeholder: 'Why you are rejecting (shared with the customer)' });
+        var msg = el('p', { class: C.err, role: 'alert' });
+        var approve = el('button', { class: C.approve, type: 'button' }, [icon('check'), el('span', { text: 'Approve' })]);
+        var reject = el('button', { class: C.danger, type: 'button' }, [icon('cross'), el('span', { text: 'Reject' })]);
         function decide(decision) {
-          if (decision === 'REJECTED' && reason.value.trim().length < 3) { msg.textContent = 'Give a reason for rejecting.'; return; }
+          if (decision === 'REJECTED' && reason.value.trim().length < 3) { msg.textContent = 'Give a reason for rejecting.'; reason.focus(); return; }
           approve.disabled = reject.disabled = true;
           api('POST', '/sessions/' + encodeURIComponent(s.id) + '/decision', { decision: decision, reason: reason.value.trim() || undefined })
             .then(function () { if (my === gen) location.hash = '#/'; })
@@ -358,13 +594,14 @@ export const APP_JS = `
         }
         approve.addEventListener('click', function () { decide('APPROVED'); });
         reject.addEventListener('click', function () { decide('REJECTED'); });
-        box.appendChild(el('label', { for: 'reason', text: 'Reason (required to reject; shared with the customer)' }));
+        box.appendChild(el('p', { class: C.small + ' mb-3', text: 'Compare the photos with what was provided and the checks above, then decide.' }));
+        box.appendChild(el('label', { class: C.labelTop, for: 'reason', text: 'Reason (required to reject; shared with the customer)' }));
         box.appendChild(reason);
         box.appendChild(msg);
-        box.appendChild(el('div', { class: 'actions' }, [approve, reject]));
+        box.appendChild(el('div', { class: 'mt-4 flex gap-3' }, [approve, reject]));
       }
-      app.appendChild(box);
-    }).catch(function (e) { if (my === gen && e.message !== 'signed-out') { holder.className = 'err'; holder.textContent = 'Session not found.'; } });
+      right.appendChild(box);
+    }).catch(function (e) { if (my === gen && e.message !== 'signed-out') { holder.className = C.err; holder.textContent = 'Session not found.'; } });
   }
 
   function route() {

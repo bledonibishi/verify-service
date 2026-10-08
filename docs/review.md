@@ -57,6 +57,10 @@ A session of another tenant is indistinguishable from one that does not exist (`
 
 Images are read from encrypted storage, decrypted into memory, and sent with `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and a `default-src 'none'; sandbox` CSP. Nothing is written back to disk in the clear (a test scans the storage directory to prove it).
 
+## Look
+
+A queue of cases with colour-coded issues (red: evidence against the person or the document; amber: something to look at), how long each has waited, and a case page with the photos next to the automated checks (pass, fail or not checked, with the face-match and liveness scores as bars), what the company provided, and the decision. Styled with Tailwind; the stylesheet is shared with the hosted page and built by `pnpm build` (see `src/hosted/tailwind.css`).
+
 ## UI hardening
 
 The page is served with `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'`, so inline script, inline style, framing and third-party loads are blocked. Every value from the API is written with `textContent`, never as HTML.

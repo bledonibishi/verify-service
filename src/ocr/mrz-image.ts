@@ -16,9 +16,27 @@ const TARGET_WIDTH = 2200;
 const MAX_WORK_PIXELS = 25_000_000;
 const BORDER = 60;
 
-/** Share of the photo's height to keep, from the bottom. 1 is the whole photo. */
-const BOTTOM_SHARES = [0.35, 0.5, 0.25, 1];
+/**
+ * Bands of the photo to try, as [top, height] fractions of its height, most likely first. The MRZ is
+ * at the bottom of the card, which is at the bottom of a close photo (the first three) but in the
+ * middle of a photo taken from further away, with the card small in a big background (the next
+ * two). The whole photo comes last.
+ */
+const BANDS: [number, number][] = [[0.65, 0.35], [0.5, 0.5], [0.75, 0.25], [0.45, 0.4], [0.3, 0.4], [0, 1]];
 const THRESHOLDS: (number | null)[] = [null, 125, 155];
+
+/**
+ * The photo turned clockwise by a quarter-turn multiple, upright as stored (EXIF applied first),
+ * for a card photographed sideways or upside down. Null if it cannot be made.
+ */
+export async function rotateImage(image: Buffer, degrees: 90 | 180 | 270): Promise<Buffer | null> {
+  try {
+    // Fast compression: the result goes straight to the engine, never to disk
+    return await sharp(image, { limitInputPixels: MAX_INPUT_PIXELS }).rotate().rotate(degrees).png({ compressionLevel: 1 }).toBuffer();
+  } catch {
+    return null;
+  }
+}
 
 export interface MrzVariantOptions {
   /** Upper bound on how many variants are produced. */
@@ -26,7 +44,7 @@ export interface MrzVariantOptions {
 }
 
 export async function* mrzVariants(image: Buffer, opts: MrzVariantOptions = {}): AsyncGenerator<Buffer> {
-  const max = opts.max ?? 12;
+  const max = opts.max ?? 18;
   let width: number;
   let height: number;
   try {
@@ -41,11 +59,11 @@ export async function* mrzVariants(image: Buffer, opts: MrzVariantOptions = {}):
   if (width < 50 || height < 20) return;
 
   // A tight crop of the MRZ (very wide) is already the region; a whole photo needs cutting down
-  const shares = width / height >= 3.5 ? [1] : BOTTOM_SHARES;
+  const bands: [number, number][] = width / height >= 3.5 ? [[0, 1]] : BANDS;
   let produced = 0;
-  for (const share of shares) {
-    const top = Math.round(height * (1 - share));
-    const cropHeight = height - top;
+  for (const [topShare, heightShare] of bands) {
+    const top = Math.round(height * topShare);
+    const cropHeight = Math.min(height - top, Math.max(1, Math.round(height * heightShare)));
     if (produced >= max) return;
     // Enlarge to about TARGET_WIDTH, but never past the pixel budget
     let targetWidth = Math.max(width, TARGET_WIDTH);
