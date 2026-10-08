@@ -117,6 +117,11 @@ export const APP_JS = `
     caption: 'mb-2 flex items-center justify-between text-sm font-semibold',
     photo: 'block h-64 w-full rounded-xl border border-line bg-[#0b0f15] object-contain',
     missing: 'flex h-64 items-center justify-center rounded-xl border border-dashed border-line bg-soft text-sm text-muted',
+    faceSlot: 'flex h-64 flex-col items-center justify-center gap-2 rounded-xl border border-line bg-soft px-4 text-center',
+    faceSlotIcon: 'mb-1 flex size-12 items-center justify-center rounded-full bg-accent-weak text-accent [&_svg]:size-6',
+    faceLineOk: 'text-sm font-semibold text-ok',
+    faceLineBad: 'text-sm font-semibold text-bad',
+    faceLineNone: 'text-sm font-semibold text-muted',
     open: 'text-xs font-semibold text-accent hover:underline',
     checkRow: 'flex items-start gap-3 py-2.5',
     checkPass: 'mt-0.5 flex-none text-ok [&_svg]:size-5',
@@ -151,7 +156,8 @@ export const APP_JS = `
     alert: [['path', { d: 'M12 4l9 16H3z' }], ['path', { d: 'M12 10v4.5M12 17.2v.3' }]],
     done: [['circle', { cx: 12, cy: 12, r: 9 }], ['path', { d: 'M8 12.5l2.6 2.6L16 9.6' }]],
     check: [['path', { d: 'M5 12.5l4.5 4.5L19 7.5' }]],
-    cross: [['path', { d: 'M6 6l12 12M18 6L6 18' }]]
+    cross: [['path', { d: 'M6 6l12 12M18 6L6 18' }]],
+    face: [['circle', { cx: 12, cy: 10, r: 4 }], ['path', { d: 'M4.5 20c1.6-3.2 4.3-4.8 7.5-4.8s5.9 1.6 7.5 4.8' }]]
   };
   function icon(name) {
     var NS = 'http://www.w3.org/2000/svg';
@@ -428,6 +434,22 @@ export const APP_JS = `
     }
     return el('div', { class: C.checkRow }, [mark, right]);
   }
+  // The face check replaced the selfie and its image is not kept: show what it found instead of an empty box
+  function faceCheckSlot(v) {
+    var l = v.liveness, f = v.face;
+    var live = l.status ? (l.status === 'live' ? 'Live' : l.status.replace(/_/g, ' ')) + (l.confidence !== null ? ' ' + l.confidence.toFixed(1) + '%' : '') : 'not checked';
+    var face = f.status ? (f.status === 'match' ? 'Match' : f.status.replace(/_/g, ' ')) + (f.similarity !== null ? ' ' + f.similarity.toFixed(1) + '%' : '') : 'not checked';
+    return el('figure', { class: C.figure }, [
+      el('figcaption', { class: C.caption, text: 'Face check' }),
+      el('div', { class: C.faceSlot }, [
+        el('div', { class: C.faceSlotIcon }, [icon('face')]),
+        el('p', { class: l.status === 'live' ? C.faceLineOk : l.status ? C.faceLineBad : C.faceLineNone, text: 'Liveness: ' + live }),
+        el('p', { class: f.status === 'match' ? C.faceLineOk : f.status ? C.faceLineBad : C.faceLineNone, text: 'Face match with the ID photo: ' + face }),
+        el('p', { class: C.small, text: 'The face image from the check is not kept.' })
+      ])
+    ]);
+  }
+
   function bool(v, good) { return v === null || v === undefined ? 'none' : v === good ? 'pass' : 'fail'; }
   function match(m) { return m === 'match' ? ['pass', 'Matches'] : m === 'mismatch' ? ['fail', 'Does not match'] : m === 'not_provided' ? ['none', 'Not provided'] : ['none', 'Not checked']; }
 
@@ -474,7 +496,8 @@ export const APP_JS = `
       var kinds = ['ID_FRONT', 'ID_BACK', 'SELFIE'].concat(['LICENCE_FRONT', 'LICENCE_BACK'].filter(function (k) { return s.documents.indexOf(k) >= 0; }));
       var NAMES = { ID_FRONT: 'ID front', ID_BACK: 'ID back', SELFIE: 'Selfie', LICENCE_FRONT: 'Licence front', LICENCE_BACK: 'Licence back' };
       var figs = kinds.map(function (k) {
-        if (s.documents.indexOf(k) < 0) return el('figure', { class: C.figure }, [el('figcaption', { class: C.caption, text: NAMES[k] }), el('div', { class: C.missing, text: k === 'SELFIE' && v && v.face.source === 'liveness' ? 'Face check used instead' : 'Not uploaded' })]);
+        if (k === 'SELFIE' && s.documents.indexOf(k) < 0 && v && (v.face.source === 'liveness' || v.liveness.status)) return faceCheckSlot(v);
+        if (s.documents.indexOf(k) < 0) return el('figure', { class: C.figure }, [el('figcaption', { class: C.caption, text: NAMES[k] }), el('div', { class: C.missing, text: 'Not uploaded' })]);
         return el('figure', { class: C.figure }, [
           el('figcaption', { class: C.caption }, [el('span', { text: NAMES[k] }), el('a', { class: C.open, href: base + k, target: '_blank', rel: 'noopener', text: 'Open full size' })]),
           el('img', { class: C.photo, src: base + k, alt: NAMES[k] + ' photo' })

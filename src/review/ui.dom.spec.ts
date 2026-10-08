@@ -183,3 +183,30 @@ describe('review page: two-factor settings and requirement', () => {
     expect(text(env.doc)).toContain('cannot be turned off');
   });
 });
+
+
+describe('review page: a case where the face check replaced the selfie', () => {
+  const CASE = {
+    id: '11111111-1111-4111-8111-111111111111', externalRef: 'order-1', status: 'NEEDS_REVIEW', createdAt: new Date().toISOString(),
+    expected: { firstName: 'Dema', lastName: 'Testi', birthDate: '1990-05-15' }, documents: ['ID_FRONT', 'ID_BACK'], review: null,
+    verification: {
+      decision: 'NEEDS_REVIEW', autoDecided: false, mrz: { found: true, valid: true, repaired: false },
+      identity: { surname: 'match', givenNames: 'match', birthDate: 'match' }, expired: false,
+      face: { status: 'match', similarity: 97.24, provider: 'rekognition', source: 'liveness' },
+      liveness: { status: 'live', confidence: 99.63, provider: 'aws' }, licence: null, checks: [], issues: ['OCR_REPAIRED'],
+    },
+  };
+
+  it('shows what the face check found in place of the selfie, and says the image is not kept', async () => {
+    const env = boot({ 'GET /me': { status: 200, json: ME }, [`GET /sessions/${CASE.id}`]: { status: 200, json: CASE } });
+    env.w.location.hash = `#/s/${CASE.id}`;
+    await flush();
+    const page = text(env.doc);
+    expect(page).toContain('Face check');
+    expect(page).toContain('Liveness: Live 99.6%');
+    expect(page).toContain('Face match with the ID photo: Match 97.2%');
+    expect(page).toContain('not kept');
+    expect(page).not.toContain('Not uploaded');
+    expect(env.doc.querySelectorAll('img')).toHaveLength(2); // only the two ID photos
+  });
+});
