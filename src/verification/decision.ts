@@ -53,6 +53,13 @@ const MISMATCH_CODE: Record<keyof IdentityComparison, string> = {
   birthDate: 'BIRTH_DATE_MISMATCH',
 };
 
+/** One letter apart: most likely an OCR misread (names have no check digit), still for a person to confirm. */
+const NEAR_MATCH_CODE: Record<keyof IdentityComparison, string> = {
+  surname: 'SURNAME_NEAR_MATCH',
+  givenNames: 'GIVEN_NAMES_NEAR_MATCH',
+  birthDate: 'BIRTH_DATE_MISMATCH', // dates are exact; never produced
+};
+
 /** True when the OCR text holds an MRZ whose check digits all pass; used to decide whether to try harder on the image. */
 export function mrzReadable(ocrText: string, now = new Date()): boolean {
   return readKosovoMrz(ocrText, { now })?.result.ok === true;
@@ -84,6 +91,7 @@ export function readIdBack(ocrText: string, expected: ExpectedIdentity, now = ne
   const identity = compareIdentity(result.data, expected);
   for (const key of Object.keys(identity) as (keyof IdentityComparison)[]) {
     if (identity[key] === 'mismatch') issueCodes.push(MISMATCH_CODE[key]);
+    if (identity[key] === 'near_match') issueCodes.push(NEAR_MATCH_CODE[key]);
     if (identity[key] === 'not_provided') issueCodes.push('EXPECTED_IDENTITY_MISSING');
   }
   if (result.data.expired) issueCodes.push('DOCUMENT_EXPIRED');

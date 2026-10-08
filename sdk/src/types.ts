@@ -2,7 +2,8 @@ export type DocumentKind = 'ID_FRONT' | 'ID_BACK' | 'SELFIE' | 'LICENCE_FRONT' |
 
 export type SessionStatus = 'PENDING' | 'PROCESSING' | 'APPROVED' | 'REJECTED' | 'NEEDS_REVIEW' | 'EXPIRED';
 
-export type Match = 'match' | 'mismatch' | 'not_provided' | 'unavailable';
+/** `near_match`: equal to the card but for one letter (likely misread); always left for a person to review. */
+export type Match = 'match' | 'near_match' | 'mismatch' | 'not_provided' | 'unavailable';
 
 export interface CreateSessionInput {
   /** Your own identifier for the person being verified. */

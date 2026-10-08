@@ -3,6 +3,7 @@ import { compareIdentity, normalizeName } from './identity';
 import { extractTd1Lines, parseKosovoTd1, repairKosovoTd1 } from './repair';
 import { parseTd1 } from './td1';
 import { SAMPLE, buildTd1 } from './testing';
+import { checkIdBack, decide } from '../../verification/decision';
 
 const NOW = new Date('2026-10-02T00:00:00Z');
 
@@ -275,6 +276,23 @@ describe('identity comparison', () => {
       givenNames: 'mismatch',
     });
     expect(compareIdentity(data, { lastName: '   ' }).surname).toBe('not_provided');
+  });
+
+  it('ignores case and accents, and calls one misread letter a near match, never a match', () => {
+    expect(compareIdentity(data, { lastName: 'KRASNIQI' }).surname).toBe('match');
+    expect(compareIdentity(data, { lastName: 'krasniqi' }).surname).toBe('match');
+    // one letter apart, same length: what a single OCR misread looks like
+    expect(compareIdentity(data, { lastName: 'Krasniqa' }).surname).toBe('near_match');
+    expect(compareIdentity(data, { firstName: 'Hana' }).givenNames).toBe('near_match');
+    // two letters, a different length, or a short name are not near
+    expect(compareIdentity(data, { lastName: 'Krasniaa' }).surname).toBe('mismatch');
+    expect(compareIdentity(data, { lastName: 'Krasniq' }).surname).toBe('mismatch');
+    expect(compareIdentity({ ...data, surname: 'ABC' }, { lastName: 'ABD' }).surname).toBe('mismatch');
+    // a near match never approves automatically and is reported for a person to look at
+    const out = checkIdBack(buildTd1({ ...SAMPLE, surname: 'KRASNIQI' }).join('\n'), { lastName: 'Krasniqa' }, NOW);
+    expect(out.issueCodes).toContain('SURNAME_NEAR_MATCH');
+    expect(out.issueCodes).not.toContain('SURNAME_MISMATCH');
+    expect(decide(out, true)).toBe('NEEDS_REVIEW');
   });
 
   it('reports mismatches and omitted fields', () => {

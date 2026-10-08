@@ -28,6 +28,7 @@ Check digits use the standard 7-3-1 weighting. The composite digit covers line 1
 - **`RKS` is not an ISO 3166 code.** Parsers that validate the country against ISO reject Kosovo documents. This module accepts it explicitly.
 - **Check digits can't catch junk in the optional field.** Fifteen identical characters always contribute a multiple of 5 to the composite sum, so `KKKKKKKKKKKKKKK` passes whenever `K` has an even value. The parser therefore flags non-empty optional data directly.
 - **Albanian letters.** Names print as `ë`/`ç` on the card but appear as `E`/`C` in the MRZ. Compare after normalising (`normalizeName`).
+- **Names have no check digit**, so one misread letter in a name passes every check. A provided name equal to the card's except for one letter in one word of four letters or more is reported as `near_match` (issue `SURNAME_NEAR_MATCH` / `GIVEN_NAMES_NEAR_MATCH`), not `mismatch`. It never approves automatically: the reviewer compares the name with the photo of the card. Upper or lower case, accents (`ë`, `ç`), hyphens and apostrophes never cause a difference.
 - **Validity.** Both observed cards were issued 30.01.2024 and expire 29.01.2029, i.e. five years. Whether this varies is unconfirmed.
 - The card is printed in Albanian, Serbian (Cyrillic) and English.
 

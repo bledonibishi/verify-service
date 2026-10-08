@@ -56,7 +56,7 @@ Reply `201`:
 
 - Send the customer to **`hostedUrl`** (open it in their browser or a webview). That is all the customer needs.
 - The session expires about an hour after creation (`expiresAt`). Create a new one if it expires.
-- Supply `firstName`, `lastName` and `birthDate` when you know them: the service compares them with the card and shows any mismatch to the pharmacist. Without them every case needs manual review anyway.
+- Supply `firstName`, `lastName` and `birthDate` when you know them: the service compares them with the card and shows any mismatch to the pharmacist. Upper/lower case and `ë`/`ç` never matter. Each identity field is `match`, `near_match` (one letter differs, most likely misread from the card; always left for a person to review), `mismatch`, `not_provided` or `unavailable`: treat any value you do not know as "not a match". Without them every case needs manual review anyway.
 - **Do not retry `POST /v1/sessions` blindly** after an unclear failure (timeout): a repeat creates a second session. Use your `externalRef` to avoid sending the same person twice.
 - Store: `id` (session id), your `externalRef`, `status`, `expiresAt`. Do **not** store or log the `uploadToken`.
 - Errors: `401` bad API key; `400` invalid body; `429` with `"code":"monthly_cap_reached"` when your monthly cap is used up; `5xx` transient.

@@ -40,6 +40,8 @@ export const APP_JS = `
     OCR_UNAVAILABLE: 'Text recognition was unavailable',
     PIPELINE_ERROR: 'Automated checks failed repeatedly',
     SURNAME_MISMATCH: 'Surname differs from what was provided',
+    SURNAME_NEAR_MATCH: 'Surname differs by one letter, likely misread from the card: compare with the photo',
+    GIVEN_NAMES_NEAR_MATCH: 'Given name differs by one letter, likely misread from the card: compare with the photo',
     GIVEN_NAMES_MISMATCH: 'Given names differ from what was provided',
     BIRTH_DATE_MISMATCH: 'Date of birth differs from what was provided',
     EXPECTED_IDENTITY_MISSING: 'No name or date of birth was provided to compare',
@@ -140,6 +142,7 @@ export const APP_JS = `
     checkPass: 'mt-0.5 flex-none text-ok [&_svg]:size-5',
     checkFail: 'mt-0.5 flex-none text-bad [&_svg]:size-5',
     checkNone: 'mt-0.5 flex-none text-muted [&_svg]:size-5',
+    checkWarn: 'mt-0.5 flex-none text-warn [&_svg]:size-5',
     checkLabel: 'flex-1',
     checkValue: 'text-sm font-semibold',
     bar: 'mt-2 h-1.5 w-full overflow-hidden rounded-full bg-soft',
@@ -431,13 +434,14 @@ export const APP_JS = `
     }
   }
 
-  // One line of the checks list: pass, fail, or not checked, with an optional score bar
+  // One line of the checks list: pass, fail, warn (for a person to look at) or not checked, with an optional score bar
   function check(label, state, value, score) {
-    var mark = el('span', { class: state === 'pass' ? C.checkPass : state === 'fail' ? C.checkFail : C.checkNone }, [icon(state === 'pass' ? 'pass' : state === 'fail' ? 'fail' : 'none')]);
+    var mark = el('span', { class: state === 'pass' ? C.checkPass : state === 'fail' ? C.checkFail : state === 'warn' ? C.checkWarn : C.checkNone },
+      [icon(state === 'pass' ? 'pass' : state === 'fail' ? 'fail' : state === 'warn' ? 'alert' : 'none')]);
     var right = el('div', { class: C.checkLabel }, [
       el('div', { class: 'flex items-baseline justify-between gap-3' }, [
         el('span', { text: label }),
-        el('span', { class: C.checkValue + ' ' + (state === 'pass' ? 'text-ok' : state === 'fail' ? 'text-bad' : 'text-muted'), text: value })
+        el('span', { class: C.checkValue + ' ' + (state === 'pass' ? 'text-ok' : state === 'fail' ? 'text-bad' : state === 'warn' ? 'text-warn' : 'text-muted'), text: value })
       ])
     ]);
     if (typeof score === 'number') {
@@ -464,7 +468,7 @@ export const APP_JS = `
   }
 
   function bool(v, good) { return v === null || v === undefined ? 'none' : v === good ? 'pass' : 'fail'; }
-  function match(m) { return m === 'match' ? ['pass', 'Matches'] : m === 'mismatch' ? ['fail', 'Does not match'] : m === 'not_provided' ? ['none', 'Not provided'] : ['none', 'Not checked']; }
+  function match(m) { return m === 'match' ? ['pass', 'Matches'] : m === 'near_match' ? ['warn', 'One letter differs'] : m === 'mismatch' ? ['fail', 'Does not match'] : m === 'not_provided' ? ['none', 'Not provided'] : ['none', 'Not checked']; }
 
   function showDetail(id) {
     var my = nav();
