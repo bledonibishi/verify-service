@@ -27,7 +27,8 @@
     "check:face": "ts-node scripts/check-face.ts",
     "check:liveness": "ts-node scripts/check-liveness.ts",
     "build:liveness": "node scripts/build-liveness.mjs",
-    "build:css": "tailwindcss -i src/hosted/tailwind.css -o hosted-dist/app.css --minify"
+    "build:css": "tailwindcss -i src/hosted/tailwind.css -o hosted-dist/app.css --minify",
+    "check:session": "ts-node scripts/check-session.ts"
   },
   "engines": {
     "node": ">=20.12"
